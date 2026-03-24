@@ -1318,6 +1318,7 @@ class InteractivePlotCanvas:
             # zoom-in: push stato corrente (limite a 50 livelli)
             if len(self._zoom_stack) < 50:
                 self._zoom_stack.append((xmin, xmax))
+                self._live_user_zoomed = True   # utente ha zoomato: blocca auto-scroll
             factor = 0.85
             cx = event.xdata if event.xdata else (xmin + xmax) / 2
             new_min = cx - (cx - xmin) * factor
@@ -1327,6 +1328,8 @@ class InteractivePlotCanvas:
             if not self._zoom_stack:
                 return
             new_min, new_max = self._zoom_stack.pop()
+        if not self._zoom_stack:
+                self._live_user_zoomed = False  # tornato alla vista originale
         ax.set_xlim(new_min, new_max)
         if self._ax2:
             self._ax2.set_xlim(new_min, new_max)
@@ -6894,7 +6897,8 @@ class LogAnalyzerApp(ctk.CTk):
         self._live_ipc.update_live(xs_raw, series, x_type,self._live_col_meta, colors=colors)
         
         # ⚡ AUTO-SCROLL live: finestra scorre automaticamente
-        if hasattr(self.master, '_live_running') and self.master._live_running.is_set():
+        if (hasattr(self.master, '_live_running') and self.master._live_running.is_set()
+                and not getattr(self._live_ipc, '_live_user_zoomed', False)):
             xs_num = [self._to_num(x) for x in xs_raw if self._to_num(x) is not None]
             if xs_num:
                 last_x = max(xs_num)
