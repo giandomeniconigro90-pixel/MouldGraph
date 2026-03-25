@@ -19,14 +19,11 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from colors import COLORS
 from pdf_export import (
     generate_lamborghini_pdf,
-    generate_front_firewall_pdf,
-    detect_csv_type,
     _autodetect_profile,
     _validate_csv,
     PROFILES,
     PRESSASTAMPI,
 )
-from csv_parser import parse_universal_csv
 
 
 class GraficiMixin:
@@ -40,8 +37,6 @@ class GraficiMixin:
         self._gr_pressa_var  = tk.StringVar(value=list(PRESSASTAMPI.keys())[0])
         self._gr_stampo_var  = tk.StringVar()
         self._gr_csv_path    = None
-        self._gr_rows        = []
-        self._gr_headers     = []
         self._gr_profile_key = None
         self._gr_fig         = None
         self._gr_canvas_widget = None
@@ -67,11 +62,14 @@ class GraficiMixin:
         ctk.CTkLabel(tb, text="Stampo:",
                      font=("Segoe UI", 10), text_color=COLORS["text2"]
                      ).pack(side="left", padx=(0, 4))
-        stampi_init = list(PRESSASTAMPI[list(PRESSASTAMPI.keys())[0]].keys())
+
+        # PRESSASTAMPI è { pressa: [stampo1, stampo2, ...] }  (lista, non dict)
+        first_pressa = list(PRESSASTAMPI.keys())[0]
+        stampi_init  = PRESSASTAMPI[first_pressa]          # lista
         self._gr_stampo_var.set(stampi_init[0] if stampi_init else "")
         self._gr_stampo_menu = ctk.CTkOptionMenu(
             tb, variable=self._gr_stampo_var,
-            values=stampi_init,
+            values=stampi_init if stampi_init else ["-"],
             width=220, height=28,
             fg_color=COLORS["surface2"], button_color=COLORS["accent"],
             text_color=COLORS["text"],
@@ -101,18 +99,19 @@ class GraficiMixin:
         preview_frame.pack(fill="both", expand=True)
         self._gr_preview_frame = preview_frame
 
-        self._gr_placeholder = ctk.CTkLabel(
+        ctk.CTkLabel(
             preview_frame,
             text="Seleziona pressa e stampo, poi apri un CSV per vedere l'anteprima.",
-            font=("Segoe UI", 13), text_color=COLORS["text2"])
-        self._gr_placeholder.pack(expand=True)
+            font=("Segoe UI", 13), text_color=COLORS["text2"]
+        ).pack(expand=True)
 
     # ------------------------------------------------------------------
     # CAMBIO PRESSA / STAMPO
     # ------------------------------------------------------------------
     def _gr_on_pressa_change(self, _=None):
         pressa = self._gr_pressa_var.get()
-        stampi = list(PRESSASTAMPI.get(pressa, {}).keys())
+        # PRESSASTAMPI[pressa] è una lista
+        stampi = PRESSASTAMPI.get(pressa, [])
         self._gr_stampo_menu.configure(values=stampi if stampi else ["-"])
         if stampi:
             self._gr_stampo_var.set(stampi[0])
@@ -130,28 +129,33 @@ class GraficiMixin:
         if not path:
             return
         try:
-            rows, headers, _, _, _ = parse_universal_csv(path)
             self._gr_csv_path = path
-            self._gr_rows     = rows
-            self._gr_headers  = headers
 
-            # autodetect profilo
-            profile_key = _autodetect_profile(rows, headers)
+            # _autodetect_profile(csv_path) → (stampo_name, profili_dict, partite_list)
+            profile_key, _, _ = _autodetect_profile(path)
             if profile_key:
                 self._gr_profile_key = profile_key
                 # allinea menu pressa/stampo
                 for pressa, stampi in PRESSASTAMPI.items():
                     if profile_key in stampi:
                         self._gr_pressa_var.set(pressa)
-                        sl = list(stampi.keys())
-                        self._gr_stampo_menu.configure(values=sl)
+                        self._gr_stampo_menu.configure(values=stampi)
                         self._gr_stampo_var.set(profile_key)
                         break
 
+            # conta righe per info label
+            n_rows = 0
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    n_rows = sum(1 for l in f if l.strip()) - 1
+            except Exception:
+                pass
+
             self._gr_info_lbl.configure(
-                text=f"{os.path.basename(path)}  |  {len(rows)} record",
+                text=f"{os.path.basename(path)}  |  ~{max(0, n_rows)} record",
                 text_color=COLORS["text"])
-            self.set_status(f"Grafici CSV: {os.path.basename(path)} ({len(rows)} record)")
+            self.set_status(
+                f"Grafici CSV: {os.path.basename(path)} (~{max(0, n_rows)} record)")
             self._gr_update_preview()
         except Exception as e:
             messagebox.showerror("Errore CSV Grafici", str(e))
@@ -160,16 +164,13 @@ class GraficiMixin:
     # ANTEPRIMA
     # ------------------------------------------------------------------
     def _gr_update_preview(self):
-        if not self._gr_rows:
+        if not self._gr_csv_path:
             return
-        pressa     = self._gr_pressa_var.get()
         stampo_key = self._gr_stampo_var.get()
-        profile    = PROFILES.get(stampo_key) or PROFILES.get(
-            PRESSASTAMPI.get(pressa, {}).get(stampo_key))
+        profile    = PROFILES.get(stampo_key)
         if not profile:
             return
 
-        # pulizia canvas precedente
         for w in self._gr_preview_frame.winfo_children():
             try:
                 w.destroy()
@@ -177,7 +178,7 @@ class GraficiMixin:
                 pass
 
         try:
-            fig = self._gr_build_preview_fig(profile)
+            fig = self._gr_build_preview_fig(stampo_key, profile)
             self._gr_fig = fig
             canvas = FigureCanvasTkAgg(fig, master=self._gr_preview_frame)
             canvas.draw()
@@ -187,69 +188,49 @@ class GraficiMixin:
             ctk.CTkLabel(
                 self._gr_preview_frame,
                 text=f"Errore anteprima: {e}",
-                font=("Segoe UI", 11), text_color=COLORS["error"]
+                font=("Segoe UI", 11), text_color=COLORS.get("error", "#ff4444")
             ).pack(expand=True)
 
-    def _gr_build_preview_fig(self, profile):
-        """Costruisce una figura matplotlib di anteprima."""
-        rows    = self._gr_rows
-        headers = self._gr_headers
-
-        time_col = next(
-            (h for h in headers if "time" in h.lower() or "tempo" in h.lower()), None)
-        if time_col is None and headers:
-            time_col = headers[0]
-
-        time_vals = []
-        for r in rows:
-            v = r.get(time_col)
-            if isinstance(v, (int, float)):
-                time_vals.append(v)
-            else:
-                time_vals.append(None)
-
-        # filtra None
-        valid = [(t, r) for t, r in zip(time_vals, rows) if t is not None]
-        if not valid:
-            valid = [(i, r) for i, r in enumerate(rows)]
-        ts   = [v[0] for v in valid]
-        vrows = [v[1] for v in valid]
-
-        # colonne temperatura
-        temp_cols = [h for h in headers
-                     if any(k in h.lower() for k in
-                            ["temp", "zona", "zone", "temperatura"])]
-        if not temp_cols:
-            temp_cols = [h for h in headers
-                         if h != time_col
-                         and isinstance(vrows[0].get(h) if vrows else None, (int, float))][:6]
-
-        fig, ax = plt.subplots(figsize=(10, 4), facecolor="#1a1b2e")
-        ax.set_facecolor("#252535")
-        ax.set_title(profile.get("title", "Anteprima"),
-                     color="#c0c0e0", fontsize=11, pad=6)
-        ax.set_xlabel(time_col or "Tempo", color="#a0a0c0", fontsize=9)
-        ax.set_ylabel("Valore", color="#a0a0c0", fontsize=9)
-        ax.tick_params(colors="#a0a0c0", labelsize=7)
-        ax.grid(True, color="#3a3a5c", linewidth=0.4, linestyle="--", alpha=0.6)
-        for sp in ax.spines.values():
-            sp.set_edgecolor("#3a3a5c")
+    def _gr_build_preview_fig(self, stampo_key, profile):
+        """Legge il CSV e costruisce la figura di anteprima con _pdf_parse_csv."""
+        from pdf_export import _pdf_parse_csv
+        data, meta = _pdf_parse_csv(self._gr_csv_path)
 
         palette = ["#6c63ff", "#00d4ff", "#52c41a", "#faad14",
                    "#f44322", "#e91e63", "#9c27b0", "#ff9800"]
-        for i, col in enumerate(temp_cols[:8]):
-            vals = [r.get(col) for r in vrows]
-            yf   = [y if isinstance(y, (int, float)) else None for y in vals]
-            xf   = [x for x, y in zip(ts, yf) if y is not None]
-            yf2  = [y for y in yf if y is not None]
-            if xf:
-                ax.plot(xf, yf2, color=palette[i % len(palette)],
-                        linewidth=1.2, label=col)
 
-        if temp_cols:
-            ax.legend(fontsize=7, loc="upper left",
-                      facecolor="#252535", labelcolor="#c0c0e0",
-                      edgecolor="#3a3a5c")
+        fig, axes = plt.subplots(2, 2, figsize=(11, 5), facecolor="#1a1b2e")
+        fig.suptitle(f"{stampo_key}  —  {meta.get('idciclo','')}", 
+                     color="#c0c0e0", fontsize=10)
+
+        plot_groups = [
+            ("Temperature SUP", [f"TS{i}" for i in range(1, 5)]),
+            ("Temperature INF", [f"TI{i}" for i in range(1, 5)]),
+            ("Forza / Posizione", ["F1", "FC", "P1", "P2"]),
+            ("Vuoto", ["VS1", "VS2", "VI1", "VI2"]),
+        ]
+
+        for ax, (title, cols) in zip(axes.flat, plot_groups):
+            ax.set_facecolor("#252535")
+            ax.set_title(title, color="#c0c0e0", fontsize=8, pad=3)
+            ax.tick_params(colors="#a0a0c0", labelsize=6)
+            ax.grid(True, color="#3a3a5c", linewidth=0.3, linestyle="--", alpha=0.5)
+            for sp in ax.spines.values():
+                sp.set_edgecolor("#3a3a5c")
+            plotted = False
+            for i, col in enumerate(cols):
+                if col in data:
+                    pts = sorted(data[col])
+                    xs  = [p[0] for p in pts]
+                    ys  = [p[1] for p in pts]
+                    ax.plot(xs, ys, color=palette[i % len(palette)],
+                            linewidth=0.9, label=col)
+                    plotted = True
+            if plotted:
+                ax.legend(fontsize=6, loc="upper left",
+                          facecolor="#252535", labelcolor="#c0c0e0",
+                          edgecolor="#3a3a5c")
+
         fig.tight_layout(pad=1.0)
         return fig
 
@@ -257,39 +238,39 @@ class GraficiMixin:
     # GENERA PDF
     # ------------------------------------------------------------------
     def _gr_export_pdf(self):
-        if not self._gr_rows:
+        if not self._gr_csv_path:
             messagebox.showwarning("Attenzione", "Nessun CSV caricato.")
             return
 
-        pressa     = self._gr_pressa_var.get()
         stampo_key = self._gr_stampo_var.get()
 
-        valid, msg = _validate_csv(self._gr_rows, self._gr_headers, stampo_key)
+        # _validate_csv(csv_path) → (bool, msg)
+        valid, msg = _validate_csv(self._gr_csv_path)
         if not valid:
             messagebox.showwarning("CSV non compatibile", msg)
             return
 
         ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
-        base = os.path.splitext(
-            os.path.basename(self._gr_csv_path))[0] if self._gr_csv_path else "report"
-        path = filedialog.asksaveasfilename(
+        base = os.path.splitext(os.path.basename(self._gr_csv_path))[0]
+        out_path = filedialog.asksaveasfilename(
             defaultextension=".pdf",
             initialfile=f"{base}_{ts}.pdf",
             filetypes=[("PDF", "*.pdf")])
-        if not path:
+        if not out_path:
             return
 
         self.set_status("Generazione PDF in corso...")
 
+        csv_path   = self._gr_csv_path
+
         def _run():
             try:
-                generate_lamborghini_pdf(
-                    self._gr_rows, self._gr_headers,
-                    path, stampo_key)
+                # generate_lamborghini_pdf(csv_path, stampo_name, output_path, ...)
+                generate_lamborghini_pdf(csv_path, stampo_key, out_path)
                 self.after(0, lambda: self.set_status(
-                    f"PDF salvato: {os.path.basename(path)}"))
+                    f"PDF salvato: {os.path.basename(out_path)}"))
                 self.after(0, lambda: messagebox.showinfo(
-                    "Completato", f"PDF salvato:\n{path}"))
+                    "Completato", f"PDF salvato:\n{out_path}"))
             except Exception as e:
                 self.after(0, lambda: messagebox.showerror("Errore PDF", str(e)))
                 self.after(0, lambda: self.set_status("Errore generazione PDF"))
