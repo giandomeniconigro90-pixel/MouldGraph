@@ -6438,6 +6438,7 @@ class LogAnalyzerApp(ctk.CTk):
         # Fix 1 — thread zombie: aspetta terminazione, poi verifica
         if self._live_thread is not None and self._live_thread.is_alive():
             self._live_running.clear()
+            self._live_ipc._live_user_zoomed = False  # reset zoom dopo pausa
             self._live_thread.join(timeout=2.0)
             if self._live_thread.is_alive():
                 # thread non terminato: rinuncia all'avvio per sicurezza
@@ -6455,6 +6456,7 @@ class LogAnalyzerApp(ctk.CTk):
                 
         # 🔄 RESET automatico zoom al PLAY
         self._live_ipc.reset_zoom()
+        self._live_ipc._live_user_zoomed = False  # Fix zoom: reset flag al PLAY
         self._live_ipc.clear_cursors()
         self._live_ipc._needs_full_redraw = True
         self._live_running.set()
@@ -6500,6 +6502,8 @@ class LogAnalyzerApp(ctk.CTk):
             return
         if self._live_paused.is_set():
             self._live_paused.clear()
+            self._live_ipc._live_user_zoomed = False  # Fix zoom: reset flag alla ripresa
+            self._live_ipc.reset_zoom()               # Fix zoom: ritorna alla vista completa
         else:
             self._live_paused.set()
         if self._live_paused.is_set():
