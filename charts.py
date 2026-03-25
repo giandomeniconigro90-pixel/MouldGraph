@@ -50,26 +50,26 @@ class TimelineCanvas(tk.Canvas):
 # -- UNIVERSAL CSV PARSER --------------------------------------------------
 
 UNIT_PATTERNS = [
-    (r"temp|calore|forno|cottura",          "°C",    "Temperatura"),
+    (r"temp|calore|forno|cottura",          "\u00b0C",    "Temperatura"),
     (r"press|bar|kpa|psi|mpa",              "bar",   "Pressione"),
     (r"forza|kn|newton|force",              "kN",    "Forza"),
     (r"portata|flow|l_min|lmin|l/min",      "L/min", "Portata"),
     (r"pos|stroke|piano|quota|mm(?!hg)",    "mm",    "Posizione"),
-    (r"vel|speed|rpm|giri|rotaz",           "rpm",   "Velocità"),
+    (r"vel|speed|rpm|giri|rotaz",           "rpm",   "Velocit\u00e0"),
     (r"vuoto|vacuum|mbar",                  "mbar",  "Vuoto"),
     (r"corr|ampere|current|amps",           "A",     "Corrente"),
     (r"volt|tension|tensione",              "V",     "Tensione"),
-    (r"umid|humid|rh(?!\w)",               "%RH",   "Umidità"),
+    (r"umid|humid|rh(?!\\w)",               "%RH",   "Umidit\u00e0"),
     (r"colla|glue|adhesive|erog",           "g/s",   "Erogazione"),
-    (r"angolo|angle|deg(?!\w)|gradi",      "°",     "Angolo"),
-    (r"peso|weight|kg(?!\w)|gram",         "kg",    "Peso"),
-    (r"freq|hz(?!\w)|hertz",               "Hz",    "Frequenza"),
-    (r"pot|watt|kw(?!\w)|power",           "kW",    "Potenza"),
+    (r"angolo|angle|deg(?!\\w)|gradi",      "\u00b0",     "Angolo"),
+    (r"peso|weight|kg(?!\\w)|gram",         "kg",    "Peso"),
+    (r"freq|hz(?!\\w)|hertz",               "Hz",    "Frequenza"),
+    (r"pot|watt|kw(?!\\w)|power",           "kW",    "Potenza"),
     (r"level|livello|fill|riempim",         "%",     "Livello"),
     (r"co2|o2|gas|ppm",                     "ppm",   "Gas"),
-    (r"vibr|accel|g(?!\w)",                "m/s²",  "Vibrazione"),
-    (r"torque|coppia|nm(?!\w)",            "Nm",    "Coppia"),
-    (r"dist|distanza|range(?!\w)",         "mm",    "Distanza"),
+    (r"vibr|accel|g(?!\\w)",                "m/s\u00b2",  "Vibrazione"),
+    (r"torque|coppia|nm(?!\\w)",            "Nm",    "Coppia"),
+    (r"dist|distanza|range(?!\\w)",         "mm",    "Distanza"),
 ]
 
 _UC_TSFMTS = [
@@ -302,27 +302,23 @@ def _uc_interpolate_timestamps(xs_raw):
     from datetime import timedelta
     if not xs_raw or not any(isinstance(x, datetime) for x in xs_raw):
         return xs_raw
-    # Raggruppa indici per timestamp identico consecutivo
     result = list(xs_raw)
     i = 0
     while i < len(xs_raw):
         if xs_raw[i] is None:
             i += 1
             continue
-        # Trova la fine del gruppo con stesso timestamp
         j = i + 1
         while j < len(xs_raw) and xs_raw[j] == xs_raw[i]:
             j += 1
         group_size = j - i
         if group_size > 1:
-            # Calcola l'intervallo verso il prossimo timestamp diverso
             next_ts = None
             for k in range(j, len(xs_raw)):
                 if xs_raw[k] is not None and xs_raw[k] != xs_raw[i]:
                     next_ts = xs_raw[k]
                     break
             if next_ts is None:
-                # Ultimo gruppo: usa l'intervallo del gruppo precedente
                 if i > 0:
                     prev_ts = xs_raw[i - 1] if xs_raw[i - 1] != xs_raw[i] else xs_raw[i]
                     interval = xs_raw[i] - prev_ts if prev_ts != xs_raw[i] else timedelta(minutes=1)
@@ -356,7 +352,6 @@ def _uc_build_series(rows, x_col, y_cols, col_meta):
                 xs_raw.append(None)
         else:
             xs_raw.append(i)
-    # Corregge automaticamente timestamp duplicati (es. logger al minuto)
     if x_type == "datetime":
         xs_raw = _uc_interpolate_timestamps(xs_raw)
     series = {}
@@ -393,19 +388,16 @@ class LineChart(tk.Canvas):
         rng=mx_v-mn_v or 1
         mn_v-=rng*0.05;mx_v+=rng*0.05;rng=mx_v-mn_v
         cw=w-pl-pr;ch=h-pt-pb;n=len(self.times)
-        # grid
         for i in range(6):
             y=pt+ch*i//5
             val=mx_v-(rng*i/5)
             self.create_line(pl,y,w-pr,y,fill=COLORS["border"],dash=(2,4))
             self.create_text(pl-4,y,text=f"{val:.1f}",fill=COLORS["text2"],font=("Segoe UI",8),anchor="e")
-        # x labels
         step=max(1,n//8)
         for i in range(0,n,step):
             x=pl+i*cw/(n-1) if n>1 else pl+cw//2
             lbl=self.times[i].strftime("%H:%M:%S") if hasattr(self.times[i],"strftime") else str(self.times[i])
             self.create_text(x,h-pb+10,text=lbl,fill=COLORS["text2"],font=("Segoe UI",8),anchor="n")
-        # lines
         for label,(color,vals) in self.series.items():
             pts=[]
             for i,v in enumerate(vals):
@@ -417,7 +409,6 @@ class LineChart(tk.Canvas):
                 self.create_line(pts[i][0],pts[i][1],pts[i+1][0],pts[i+1][1],fill=color,width=2)
             if pts:
                 self.create_oval(pts[-1][0]-3,pts[-1][1]-3,pts[-1][0]+3,pts[-1][1]+3,fill=color,outline="")
-        # legend
         lx=pl;ly=5
         for label,(color,_) in self.series.items():
             self.create_rectangle(lx,ly,lx+12,ly+10,fill=color,outline="")
@@ -452,13 +443,18 @@ class PumpCanvas(tk.Canvas):
             self.create_text(x,h-pb+10,text=lbl,fill=COLORS["text2"],font=("Segoe UI",8),anchor="n")
 
 
-
-
-# -- INTERACTIVE PLOT CANVAS (Universal CSV Plotter) -----------------------
-
 _UC_SERIES_PALETTE = [
     "#e5672c", "#3f51b5", "#29b6f6", "#66bb6a",
     "#9c27b0", "#ff9800", "#e7b73b", "#607d8b",
     "#f44322", "#00bcd4", "#8bc34a", "#ff5722",
 ]
 
+
+# -- UTILITY: isola lo scroll del mouse su un widget scrollabile CTk --
+def _isolate_scroll(widget):
+    """Impedisce che lo scroll del mouse su 'widget' si propaghi al genitore."""
+    def _block(event):
+        return "break"
+    widget.bind("<MouseWheel>", _block, add=True)
+    widget.bind("<Button-4>",   _block, add=True)   # Linux scroll up
+    widget.bind("<Button-5>",   _block, add=True)   # Linux scroll down
