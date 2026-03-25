@@ -1,119 +1,36 @@
 # -*- coding: utf-8 -*-
+"""
+csv_parser.py
+Parser CSV universale, Siemens, long-format (Cannon/Persico/Krauss Maffei),
+rilevamento anomalie, costruzione serie per grafici.
+"""
 import csv, re, math, os
 import io as _io
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import OrderedDict, defaultdict
 
-# -- SIEMENS CSV PARSER --
-def parse_siemens_csv(text):
-    rows=[];headers=[]
-    reader=csv.reader(text.splitlines())
-    for i,row in enumerate(reader):
-        if i==0:
-            headers=[h.strip().strip('"') for h in row]
-        else:
-            if not any(c.strip() for c in row):continue
-            d={}
-            for j,h in enumerate(headers):
-                val=row[j].strip().strip('"') if j<len(row) else ""
-                try:d[h]=float(val)
-                except Exception:d[h]=val
-            # parse timestamp
-            ts=None
-            for tcol in["UTC Time","Date_Time","Datetime","timestamp","Time","Date"]:
-                if tcol in d and d[tcol]:
-                    for fmt in["%Y-%m-%d %H:%M:%S","%Y-%m-%dT%H:%M:%S","%d/%m/%Y %H:%M:%S",
-                               "%Y-%m-%d %H:%M:%S.%f","%d-%m-%Y %H:%M:%S"]:
-                        try:ts=datetime.strptime(str(d[tcol]),fmt);break
-                        except Exception:pass
-                if ts:break
-            if ts is None and "Date" in d and "Time" in d:
-                try:ts=datetime.strptime(f"{d['Date']} {d['Time']}","%Y-%m-%d %H:%M:%S")
-                except Exception:pass
-            d["_ts"]=ts
-            rows.append(d)
-    return headers,rows
-
-def detect_anomalies(rows,headers):
-    anomalies=[]
-    numeric_cols=[h for h in headers if h not in("Record","Date","Time","UTC Time","_ts")
-                  and rows and isinstance(rows[0].get(h),float)]
-    # compute stats
-    stats={}
-    for col in numeric_cols:
-        vals=[r[col] for r in rows if isinstance(r.get(col),float)]
-        if not vals:continue
-        mn=sum(vals)/len(vals)
-        sd=math.sqrt(sum((v-mn)**2 for v in vals)/len(vals)) if len(vals)>1 else 0
-        stats[col]={"min":min(vals),"max":max(vals),"mean":mn,"std":sd}
-
-    for i,row in enumerate(rows):
-        ts=row.get("_ts")
-        ts_str=ts.strftime("%H:%M:%S") if ts else f"riga {i+1}"
-
-        # Pompa spenta
-        for pk in["Stato_Pompa","stato_pompa","pump_state","PumpState"]:
-            if pk in row and str(row[pk]).strip() in("0","0.0"):
-                prev=rows[i-1] if i>0 else None
-                if prev and str(prev.get(pk,1)).strip() not in("0","0.0"):
-                    anomalies.append(("ALLARME",f"Pompa spenta [{ts_str}]",
-                        f"Stato_Pompa = 0 al record {int(row.get('Record',i+1))}. La pompa si e' fermata.","#ff4d4f"))
-
-        # Spike fuori 2.5 sigma
-        for col in numeric_cols:
-            if col in("Record","Stato_Pompa","stato_pompa"):continue
-            if col not in stats:continue
-            val=row.get(col)
-            if not isinstance(val,float):continue
-            st=stats[col]
-            if st["std"]>0 and abs(val-st["mean"])>2.5*st["std"]:
-                direction="alto" if val>st["mean"] else "basso"
-                anomalies.append(("ANOMALIA",f"{col} fuori range [{ts_str}]",
-                    f"Valore {val:.2f} (media {st['mean']:.2f} +/- {st['std']:.2f}). Picco verso il {direction}.","#faad14"))
-
-        # Livello >95%
-        for lk in["Livello_Perc","livello","level","Livello"]:
-            if lk in row and isinstance(row[lk],float) and row[lk]>95:
-                anomalies.append(("ATTENZIONE",f"Livello critico [{ts_str}]",
-                    f"{lk} = {row[lk]:.1f}% (soglia: 95%). Rischio overflow.","#faad14"))
-
-        # Pressione <1.0 bar
-        for pk2 in["Pressione_Bar","pressione","pressure","Pressione"]:
-            if pk2 in row and isinstance(row[pk2],float) and row[pk2]<1.0:
-                anomalies.append(("ATTENZIONE",f"Pressione bassa [{ts_str}]",
-                    f"{pk2} = {row[pk2]:.2f} bar. Valore sotto la soglia minima (1.0 bar).","#ff4d4f"))
-
-    # deduplica ravvicinati
-    seen=set();out=[]
-    for a in anomalies:
-        key=(a[0],a[1][:30])
-        if key not in seen:seen.add(key);out.append(a)
-    return out,stats
-
-# -- TIMELINE CANVAS --
-# -- UNIVERSAL CSV PARSER --------------------------------------------------
-
+# ── Pattern unità di misura per rilevamento automatico colonne ────────────
 UNIT_PATTERNS = [
-    (r"temp|calore|forno|cottura",          "°C",    "Temperatura"),
+    (r"temp|calore|forno|cottura",          "\u00b0C",   "Temperatura"),
     (r"press|bar|kpa|psi|mpa",              "bar",   "Pressione"),
     (r"forza|kn|newton|force",              "kN",    "Forza"),
     (r"portata|flow|l_min|lmin|l/min",      "L/min", "Portata"),
     (r"pos|stroke|piano|quota|mm(?!hg)",    "mm",    "Posizione"),
-    (r"vel|speed|rpm|giri|rotaz",           "rpm",   "Velocità"),
+    (r"vel|speed|rpm|giri|rotaz",           "rpm",   "Velocit\u00e0"),
     (r"vuoto|vacuum|mbar",                  "mbar",  "Vuoto"),
     (r"corr|ampere|current|amps",           "A",     "Corrente"),
     (r"volt|tension|tensione",              "V",     "Tensione"),
-    (r"umid|humid|rh(?!\w)",               "%RH",   "Umidità"),
+    (r"umid|humid|rh(?!\\w)",               "%RH",   "Umidit\u00e0"),
     (r"colla|glue|adhesive|erog",           "g/s",   "Erogazione"),
-    (r"angolo|angle|deg(?!\w)|gradi",      "°",     "Angolo"),
-    (r"peso|weight|kg(?!\w)|gram",         "kg",    "Peso"),
-    (r"freq|hz(?!\w)|hertz",               "Hz",    "Frequenza"),
-    (r"pot|watt|kw(?!\w)|power",           "kW",    "Potenza"),
+    (r"angolo|angle|deg(?!\\w)|gradi",      "\u00b0",     "Angolo"),
+    (r"peso|weight|kg(?!\\w)|gram",         "kg",    "Peso"),
+    (r"freq|hz(?!\\w)|hertz",               "Hz",    "Frequenza"),
+    (r"pot|watt|kw(?!\\w)|power",           "kW",    "Potenza"),
     (r"level|livello|fill|riempim",         "%",     "Livello"),
     (r"co2|o2|gas|ppm",                     "ppm",   "Gas"),
-    (r"vibr|accel|g(?!\w)",                "m/s²",  "Vibrazione"),
-    (r"torque|coppia|nm(?!\w)",            "Nm",    "Coppia"),
-    (r"dist|distanza|range(?!\w)",         "mm",    "Distanza"),
+    (r"vibr|accel|g(?!\\w)",                "m/s\u00b2",  "Vibrazione"),
+    (r"torque|coppia|nm(?!\\w)",            "Nm",    "Coppia"),
+    (r"dist|distanza|range(?!\\w)",         "mm",    "Distanza"),
 ]
 
 _UC_TSFMTS = [
@@ -126,6 +43,11 @@ _UC_TSFMTS = [
     "%H:%M:%S",
 ]
 
+_LONG_TS_FMT = "%d_%m_%Y_%H_%M_%S"
+
+
+# ── Helpers interni ───────────────────────────────────────────────────────
+
 def _uc_parse_dt(s):
     s = s.strip().rstrip("Z")
     for fmt in _UC_TSFMTS:
@@ -135,12 +57,14 @@ def _uc_parse_dt(s):
             pass
     return None
 
+
 def _uc_try_float(s):
     try:
         float(s.replace(",", ".").replace(" ", ""))
         return True
     except Exception:
         return False
+
 
 def _uc_col_meta(col_name, sample_vals):
     non_empty = [v.strip() for v in sample_vals if v.strip()]
@@ -160,6 +84,110 @@ def _uc_col_meta(col_name, sample_vals):
                 return unit, label, "numeric"
         return "", col_name, "numeric"
     return "", col_name, "text"
+
+
+# ── Parser Siemens CSV ────────────────────────────────────────────────────
+
+def parse_siemens_csv(text):
+    rows = []; headers = []
+    reader = csv.reader(text.splitlines())
+    for i, row in enumerate(reader):
+        if i == 0:
+            headers = [h.strip().strip('"') for h in row]
+        else:
+            if not any(c.strip() for c in row):
+                continue
+            d = {}
+            for j, h in enumerate(headers):
+                val = row[j].strip().strip('"') if j < len(row) else ""
+                try:
+                    d[h] = float(val)
+                except Exception:
+                    d[h] = val
+            ts = None
+            for tcol in ["UTC Time", "Date_Time", "Datetime", "timestamp", "Time", "Date"]:
+                if tcol in d and d[tcol]:
+                    for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S",
+                                "%d/%m/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f",
+                                "%d-%m-%Y %H:%M:%S"]:
+                        try:
+                            ts = datetime.strptime(str(d[tcol]), fmt)
+                            break
+                        except Exception:
+                            pass
+                if ts:
+                    break
+            if ts is None and "Date" in d and "Time" in d:
+                try:
+                    ts = datetime.strptime(f"{d['Date']} {d['Time']}", "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    pass
+            d["_ts"] = ts
+            rows.append(d)
+    return headers, rows
+
+
+def detect_anomalies(rows, headers):
+    anomalies = []
+    numeric_cols = [
+        h for h in headers
+        if h not in ("Record", "Date", "Time", "UTC Time", "_ts")
+        and rows and isinstance(rows[0].get(h), float)
+    ]
+    stats = {}
+    for col in numeric_cols:
+        vals = [r[col] for r in rows if isinstance(r.get(col), float)]
+        if not vals:
+            continue
+        mn = sum(vals) / len(vals)
+        sd = math.sqrt(sum((v - mn) ** 2 for v in vals) / len(vals)) if len(vals) > 1 else 0
+        stats[col] = {"min": min(vals), "max": max(vals), "mean": mn, "std": sd}
+
+    for i, row in enumerate(rows):
+        ts = row.get("_ts")
+        ts_str = ts.strftime("%H:%M:%S") if ts else f"riga {i + 1}"
+
+        for pk in ["Stato_Pompa", "stato_pompa", "pump_state", "PumpState"]:
+            if pk in row and str(row[pk]).strip() in ("0", "0.0"):
+                prev = rows[i - 1] if i > 0 else None
+                if prev and str(prev.get(pk, 1)).strip() not in ("0", "0.0"):
+                    anomalies.append(("ALLARME", f"Pompa spenta [{ts_str}]",
+                        f"Stato_Pompa = 0 al record {int(row.get('Record', i + 1))}. La pompa si e' fermata.",
+                        "#ff4d4f"))
+
+        for col in numeric_cols:
+            if col in ("Record", "Stato_Pompa", "stato_pompa") or col not in stats:
+                continue
+            val = row.get(col)
+            if not isinstance(val, float):
+                continue
+            st = stats[col]
+            if st["std"] > 0 and abs(val - st["mean"]) > 2.5 * st["std"]:
+                direction = "alto" if val > st["mean"] else "basso"
+                anomalies.append(("ANOMALIA", f"{col} fuori range [{ts_str}]",
+                    f"Valore {val:.2f} (media {st['mean']:.2f} +/- {st['std']:.2f}). Picco verso il {direction}.",
+                    "#faad14"))
+
+        for lk in ["Livello_Perc", "livello", "level", "Livello"]:
+            if lk in row and isinstance(row[lk], float) and row[lk] > 95:
+                anomalies.append(("ATTENZIONE", f"Livello critico [{ts_str}]",
+                    f"{lk} = {row[lk]:.1f}% (soglia: 95%). Rischio overflow.", "#faad14"))
+
+        for pk2 in ["Pressione_Bar", "pressione", "pressure", "Pressione"]:
+            if pk2 in row and isinstance(row[pk2], float) and row[pk2] < 1.0:
+                anomalies.append(("ATTENZIONE", f"Pressione bassa [{ts_str}]",
+                    f"{pk2} = {row[pk2]:.2f} bar. Valore sotto la soglia minima (1.0 bar).",
+                    "#ff4d4f"))
+
+    seen = set(); out = []
+    for a in anomalies:
+        key = (a[0], a[1][:30])
+        if key not in seen:
+            seen.add(key); out.append(a)
+    return out, stats
+
+
+# ── Parser CSV universale ─────────────────────────────────────────────────
 
 def parse_universal_csv(filepath):
     raw = None
@@ -184,7 +212,6 @@ def parse_universal_csv(filepath):
     sep = max(counts, key=counts.get)
     if counts[sep] == 0:
         sep = ","
-    import io as _io
     reader = csv.DictReader(_io.StringIO("\n".join(lines)), delimiter=sep)
     rows = []
     for row in reader:
@@ -210,11 +237,7 @@ def parse_universal_csv(filepath):
     return rows, headers, col_meta, numeric_cols, datetime_cols, binary_cols, sep, detected_enc
 
 
-# ── PARSER CSV LONG FORMAT (Cannon / Persico / Krauss Maffei) ─────────────
-# Formato: una riga per (Timestamp × Parametro), colonne Parametro+Valore
-# Viene pivotato in wide format: una riga per Timestamp, colonne = Parametri
-
-_LONG_TS_FMT = "%d_%m_%Y_%H_%M_%S"
+# ── Parser CSV long-format (Cannon / Persico / Krauss Maffei) ─────────────
 
 def _is_long_cycle_csv(filepath):
     """Ritorna True se il CSV è nel formato long (Partita, Parametro, Timestamp, Valore)."""
@@ -229,18 +252,17 @@ def _is_long_cycle_csv(filepath):
                 continue
         if lines is None:
             return False
-        # salta riga REPORT GENERATED
         start = 1 if lines and lines[0].upper().startswith("REPORT") else 0
         hdr = lines[start] if start < len(lines) else ""
         cols = [h.strip() for h in hdr.split(",")]
-        required = {"Parametro", "Timestamp", "Valore"}
-        return required.issubset(set(cols))
+        return {"Parametro", "Timestamp", "Valore"}.issubset(set(cols))
     except Exception:
         return False
 
+
 def _parse_long_cycle_csv(filepath):
     """Parsea il CSV long-format e lo pivota in wide.
-    Ritorna stessa firma di parse_universal_csv."""
+    Restituisce la stessa firma di parse_universal_csv."""
     raw = None
     detected_enc = "utf-8"
     for enc in ["utf-8-sig", "utf-8", "latin-1", "cp1252"]:
@@ -257,15 +279,10 @@ def _parse_long_cycle_csv(filepath):
     lines = [l for l in raw.splitlines() if l.strip()]
     start = 1 if lines and lines[0].upper().startswith("REPORT") else 0
     hdr_line = lines[start]
-    
-    # rileva separatore dall'header (virgola o punto-e-virgola)
     _data_line = lines[start + 1] if start + 1 < len(lines) else hdr_line
     _sep = ";" if _data_line.count(";") > _data_line.count(",") else ","
-    
-    # header SEMPRE split con virgola
     hdr_cols = [h.strip() for h in hdr_line.split(",")]
 
-    # indici colonne chiave
     try:
         i_param = hdr_cols.index("Parametro")
         i_ts    = hdr_cols.index("Timestamp")
@@ -273,14 +290,12 @@ def _parse_long_cycle_csv(filepath):
     except ValueError as e:
         raise ValueError(f"Colonna mancante: {e}")
 
-    # raggruppa per timestamp → {ts_str: {param: valore}}
-    from collections import OrderedDict
     buckets = OrderedDict()
     for line in lines[start + 1:]:
         parts = line.split(_sep)
         if len(parts) <= max(i_param, i_ts, i_val):
             continue
-        param = parts[i_param].strip()
+        param  = parts[i_param].strip()
         ts_str = parts[i_ts].strip()
         val_s  = parts[i_val].strip().replace(",", ".")
         if not param or not ts_str:
@@ -295,7 +310,6 @@ def _parse_long_cycle_csv(filepath):
     if not buckets:
         raise ValueError("Nessun dato trovato nel CSV long-format.")
 
-    # ordina per timestamp reale
     def _parse_ts(s):
         for fmt in [_LONG_TS_FMT,
                     "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%SZ",
@@ -307,13 +321,9 @@ def _parse_long_cycle_csv(filepath):
                 pass
         return None
 
-    sorted_ts = sorted(buckets.keys(), key=lambda s: (_parse_ts(s) or datetime.min))
+    sorted_ts  = sorted(buckets.keys(), key=lambda s: (_parse_ts(s) or datetime.min))
+    all_params = list(dict.fromkeys(p for ts in sorted_ts for p in buckets[ts]))
 
-    # raccoglie tutti i parametri nell'ordine di prima apparizione
-    all_params = list(dict.fromkeys(
-        p for ts in sorted_ts for p in buckets[ts]))
-
-    # costruisce le righe wide
     rows = []
     for ts_str in sorted_ts:
         r = {"_ts_str": ts_str}
@@ -324,49 +334,41 @@ def _parse_long_cycle_csv(filepath):
             r[p] = buckets[ts_str].get(p, None)
         rows.append(r)
 
-    # costruisce col_meta per ogni parametro numerico
     headers      = all_params
     col_meta     = {}
     numeric_cols = []
     for p in all_params:
-        unit, label, col_type = _uc_col_meta(p, [
-            str(rows[i].get(p, "")) for i in range(min(20, len(rows)))])
+        unit, label, col_type = _uc_col_meta(
+            p, [str(rows[i].get(p, "")) for i in range(min(20, len(rows)))])
         col_meta[p] = {"unit": unit, "label": label, "col_type": "numeric"}
         numeric_cols.append(p)
 
-    datetime_cols = []   # usiamo _ts direttamente
-    binary_cols   = []
+    return rows, headers, col_meta, numeric_cols, [], [], _sep, detected_enc
 
-    return rows, headers, col_meta, numeric_cols, datetime_cols, binary_cols, _sep, detected_enc
 
+# ── Interpolazione timestamp duplicati ────────────────────────────────────
 
 def _uc_interpolate_timestamps(xs_raw):
-    """Se più campioni hanno lo stesso timestamp (es. logger al minuto),
-    li distribuisce uniformemente nell'intervallo fino al timestamp successivo."""
-    from datetime import timedelta
+    """Distribuisce uniformemente campioni con timestamp identico."""
     if not xs_raw or not any(isinstance(x, datetime) for x in xs_raw):
         return xs_raw
-    # Raggruppa indici per timestamp identico consecutivo
     result = list(xs_raw)
     i = 0
     while i < len(xs_raw):
         if xs_raw[i] is None:
             i += 1
             continue
-        # Trova la fine del gruppo con stesso timestamp
         j = i + 1
         while j < len(xs_raw) and xs_raw[j] == xs_raw[i]:
             j += 1
         group_size = j - i
         if group_size > 1:
-            # Calcola l'intervallo verso il prossimo timestamp diverso
             next_ts = None
             for k in range(j, len(xs_raw)):
                 if xs_raw[k] is not None and xs_raw[k] != xs_raw[i]:
                     next_ts = xs_raw[k]
                     break
             if next_ts is None:
-                # Ultimo gruppo: usa l'intervallo del gruppo precedente
                 if i > 0:
                     prev_ts = xs_raw[i - 1] if xs_raw[i - 1] != xs_raw[i] else xs_raw[i]
                     interval = xs_raw[i] - prev_ts if prev_ts != xs_raw[i] else timedelta(minutes=1)
@@ -380,6 +382,9 @@ def _uc_interpolate_timestamps(xs_raw):
         i = j
     return result
 
+
+# ── Costruzione serie per grafici ──────────────────────────────────────────
+
 def _uc_build_series(rows, x_col, y_cols, col_meta):
     if not rows:
         return [], {}, "index"
@@ -391,8 +396,7 @@ def _uc_build_series(rows, x_col, y_cols, col_meta):
     xs_raw = []
     for i, r in enumerate(rows):
         if x_col and x_type == "datetime":
-            val = _uc_parse_dt(r.get(x_col, ""))
-            xs_raw.append(val)
+            xs_raw.append(_uc_parse_dt(r.get(x_col, "")))
         elif x_col and x_type == "numeric":
             try:
                 xs_raw.append(float(r.get(x_col, "").replace(",", ".")))
@@ -400,7 +404,6 @@ def _uc_build_series(rows, x_col, y_cols, col_meta):
                 xs_raw.append(None)
         else:
             xs_raw.append(i)
-    # Corregge automaticamente timestamp duplicati (es. logger al minuto)
     if x_type == "datetime":
         xs_raw = _uc_interpolate_timestamps(xs_raw)
     series = {}
@@ -415,15 +418,3 @@ def _uc_build_series(rows, x_col, y_cols, col_meta):
                 vals.append(None)
         series[col] = vals
     return xs_raw, series, x_type
-
-
-# -- SIEMENS LINE CHART --
-# -- PUMP STATE CANVAS --
-# -- INTERACTIVE PLOT CANVAS (Universal CSV Plotter) -----------------------
-
-_UC_SERIES_PALETTE = [
-    "#e5672c", "#3f51b5", "#29b6f6", "#66bb6a",
-    "#9c27b0", "#ff9800", "#e7b73b", "#607d8b",
-    "#f44322", "#00bcd4", "#8bc34a", "#ff5722",
-]
-
