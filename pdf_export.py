@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import os, re, csv, math
+from collections import defaultdict
 from datetime import datetime
 import matplotlib
 matplotlib.use("Agg")
@@ -7,6 +8,204 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
 from colors import COLORS
+
+# ---------------------------------------------------------------------------
+# Palette colori PDF (usata da _pdf_setup_ax, _pdf_temp, _pdf_forza, ecc.)
+# ---------------------------------------------------------------------------
+_PC = {
+    "bg":        "#dff0d8",   # sfondo fascia verde OK
+    "grid":      "#dddddd",   # griglia assi
+    "set_temp":  "#e5672c",   # linea SET temperatura
+    "set_forza": "#e5672c",   # linea SET / SPC forza
+    "lmax":      "#cc0000",   # linea LMax
+    "lmin":      "#0055cc",   # linea LMin
+    1:           "#407da5",
+    2:           "#e5672c",
+    3:           "#659346",
+    4:           "#e7b73b",
+    5:           "#9b59b6",
+    6:           "#1abc9c",
+    7:           "#e74c3c",
+    8:           "#34495e",
+}
+
+# ---------------------------------------------------------------------------
+# Profili stampo – parametri grafici per generate_lamborghini_pdf
+# ---------------------------------------------------------------------------
+_PROFILES = {
+    "Front Firewall": dict(
+        persico         = True,
+        ricetta         = "3",
+        teorico_sec     = 1496,
+        skip_seconds    = 0,
+        temp_set_sup    = 130.0,
+        temp_set_inf    = 128.0,
+        temp_y          = (100, 160),
+        temp_yticks     = [100, 110, 120, 130, 140, 150, 160],
+        temp_range      = (130, 150),
+        forza_spc       = 6500.0,
+        forza_delta     = 250.0,
+        forza_y         = (6000, 6800),
+        forza_yticks    = [6000, 6100, 6200, 6300, 6400, 6500, 6600, 6700, 6800],
+        forza_range     = (6250, 6750),
+        forza_legend_loc= "lower right",
+        vuoto_y         = (-1000, 0),
+        vuoto_yticks    = [-1000, -900, -800, -700, -600, -500, -400, -300, -200, -100, 0],
+        vuoto_range     = (-1000, -200),
+        posiz_y         = (-0.35, 0.05),
+        posiz_yticks    = [-0.35, -0.30, -0.25, -0.20, -0.15, -0.10, -0.05, 0.0, 0.05],
+        x_max           = 1496,
+        x_ticks         = list(range(0, 1497, 150)),
+        x_ticks_tv      = list(range(44, 1453, 44)),
+        x_ticks_pos     = list(range(11, 1464, 44)),
+        x_ticks_forza   = list(range(44, 1497, 44)),
+        x_ticks_vac_sup = list(range(44, 1453, 44)),
+        x_ticks_vac_inf = list(range(44, 1453, 44)),
+    ),
+    "Central Cofango": dict(
+        persico         = True,
+        ricetta         = "5",
+        teorico_sec     = 1200,
+        skip_seconds    = 0,
+        temp_set_sup    = 130.0,
+        temp_set_inf    = 128.0,
+        temp_y          = (100, 160),
+        temp_yticks     = [100, 110, 120, 130, 140, 150, 160],
+        temp_range      = (130, 150),
+        forza_spc       = 6500.0,
+        forza_delta     = 250.0,
+        forza_y         = (6000, 6800),
+        forza_yticks    = [6000, 6100, 6200, 6300, 6400, 6500, 6600, 6700, 6800],
+        forza_range     = (6250, 6750),
+        forza_legend_loc= "lower right",
+        vuoto_y         = (-1000, 0),
+        vuoto_yticks    = [-1000, -900, -800, -700, -600, -500, -400, -300, -200, -100, 0],
+        vuoto_range     = (-1000, -200),
+        posiz_y         = (-0.35, 0.05),
+        posiz_yticks    = [-0.35, -0.30, -0.25, -0.20, -0.15, -0.10, -0.05, 0.0, 0.05],
+        x_max           = 1200,
+        x_ticks         = list(range(0, 1201, 120)),
+        x_ticks_tv      = list(range(44, 1201, 44)),
+        x_ticks_pos     = list(range(11, 1212, 44)),
+        x_ticks_forza   = list(range(44, 1201, 44)),
+        x_ticks_vac_sup = list(range(44, 1201, 44)),
+        x_ticks_vac_inf = list(range(44, 1201, 44)),
+    ),
+    "Side Cofango Inner": dict(
+        persico         = True,
+        ricetta         = "6",
+        teorico_sec     = 1200,
+        skip_seconds    = 0,
+        temp_set_sup    = 130.0,
+        temp_set_inf    = 128.0,
+        temp_y          = (100, 160),
+        temp_yticks     = [100, 110, 120, 130, 140, 150, 160],
+        temp_range      = (130, 150),
+        forza_spc       = 6500.0,
+        forza_delta     = 250.0,
+        forza_y         = (6000, 6800),
+        forza_yticks    = [6000, 6100, 6200, 6300, 6400, 6500, 6600, 6700, 6800],
+        forza_range     = (6250, 6750),
+        forza_legend_loc= "lower right",
+        vuoto_y         = (-1000, 0),
+        vuoto_yticks    = [-1000, -900, -800, -700, -600, -500, -400, -300, -200, -100, 0],
+        vuoto_range     = (-1000, -200),
+        posiz_y         = (-0.35, 0.05),
+        posiz_yticks    = [-0.35, -0.30, -0.25, -0.20, -0.15, -0.10, -0.05, 0.0, 0.05],
+        x_max           = 1200,
+        x_ticks         = list(range(0, 1201, 120)),
+        x_ticks_tv      = list(range(44, 1201, 44)),
+        x_ticks_pos     = list(range(11, 1212, 44)),
+        x_ticks_forza   = list(range(44, 1201, 44)),
+        x_ticks_vac_sup = list(range(44, 1201, 44)),
+        x_ticks_vac_inf = list(range(44, 1201, 44)),
+    ),
+    "Inner Tub": dict(
+        persico         = False,
+        ricetta         = "1",
+        teorico_sec     = 1800,
+        skip_seconds    = 0,
+        temp_set_sup    = 145.0,
+        temp_set_inf    = 143.0,
+        temp_y          = (100, 180),
+        temp_yticks     = [100, 110, 120, 130, 140, 150, 160, 170, 180],
+        forza_spc       = 6500.0,
+        forza_delta     = 300.0,
+        forza_y         = (5800, 7000),
+        forza_yticks    = [5800, 6000, 6200, 6400, 6600, 6800, 7000],
+        forza_legend_loc= "lower right",
+        vuoto_y         = (0.0, 1.2),
+        vuoto_yticks    = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2],
+        posiz_y         = (-350, 50),
+        posiz_yticks    = list(range(-350, 51, 50)),
+        x_max           = 1800,
+        x_ticks         = list(range(0, 1801, 180)),
+    ),
+    "Polecrasher": dict(
+        persico         = False,
+        ricetta         = "2",
+        teorico_sec     = 1500,
+        skip_seconds    = 0,
+        temp_set_sup    = 140.0,
+        temp_set_inf    = 138.0,
+        temp_y          = (100, 170),
+        temp_yticks     = [100, 110, 120, 130, 140, 150, 160, 170],
+        forza_spc       = 6500.0,
+        forza_delta     = 300.0,
+        forza_y         = (5800, 7200),
+        forza_yticks    = [5800, 6000, 6200, 6400, 6600, 6800, 7000, 7200],
+        forza_legend_loc= "lower right",
+        vuoto_y         = (0.0, 1.2),
+        vuoto_yticks    = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2],
+        posiz_y         = (-350, 50),
+        posiz_yticks    = list(range(-350, 51, 50)),
+        x_max           = 1500,
+        x_ticks         = list(range(0, 1501, 150)),
+    ),
+    "Tub Floor Shell": dict(
+        persico         = False,
+        ricetta         = "4",
+        teorico_sec     = 1400,
+        skip_seconds    = 0,
+        temp_set_sup    = 135.0,
+        temp_set_inf    = 133.0,
+        temp_y          = (100, 170),
+        temp_yticks     = [100, 110, 120, 130, 140, 150, 160, 170],
+        forza_spc       = 6500.0,
+        forza_delta     = 300.0,
+        forza_y         = (5800, 7200),
+        forza_yticks    = [5800, 6000, 6200, 6400, 6600, 6800, 7000, 7200],
+        forza_legend_loc= "lower right",
+        vuoto_y         = (0.0, 1.2),
+        vuoto_yticks    = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2],
+        posiz_y         = (-350, 50),
+        posiz_yticks    = list(range(-350, 51, 50)),
+        x_max           = 1400,
+        x_ticks         = list(range(0, 1401, 140)),
+    ),
+}
+
+# ---------------------------------------------------------------------------
+# Mappa presse -> stampi disponibili (usata dalla UI, tab Grafici)
+# ---------------------------------------------------------------------------
+PRESSASTAMPI = {
+    "Persico 2500T": [
+        "Front Firewall",
+        "Central Cofango",
+        "Side Cofango Inner",
+    ],
+    "Cannon 5000T": [
+        "Inner Tub",
+        "Polecrasher",
+        "Tub Floor Shell",
+    ],
+}
+
+# ---------------------------------------------------------------------------
+# Alias pubblici richiesti da app_main.py
+# ---------------------------------------------------------------------------
+PROFILES = _PROFILES
+
 
 def generate_plant_pdf(rows, headers, col_meta,
                        x_col, y_cols, y2_cols,
@@ -108,7 +307,6 @@ def generate_plant_pdf(rows, headers, col_meta,
             fig, title=plant_name, subtitle=subtitle, logo_path=logo_path,
             page_num=1, total_pages=total_pages,
             generated_at=generated_at, meta_rows=meta_p1)
-        # ── Tabella statistica (opzione A) ──────────────────────────────────────
         tbl_top = max(0.10, plot_top - 0.05)
         ax_tbl = fig.add_axes([0.05, 0.05, 0.90, max(0.10, tbl_top - 0.10)])
         ax_tbl.axis("off")
@@ -205,7 +403,6 @@ def generate_plant_pdf(rows, headers, col_meta,
                                  zorder=3)
                     h2, l2 = ax2.get_legend_handles_labels()
                     ax2.legend(h2, l2, loc="upper right", fontsize=6.5, framealpha=0.8)
-                # ── serie ② confronto CSV (linee tratteggiate) ────────
                 if rows2 and cols2:
                     _xs2, _s2, _xt2 = _uc_build_series(
                         rows2, x_col, cols2, col_meta2 or {})
@@ -327,27 +524,19 @@ def _pdf_setup_ax(ax, title, ylabel, ylim, yticks, xticks, xmax, draw_bg=True, b
 
 def _pdf_temp(ax, data, params, setval, title, pr):
     _pdf_setup_ax(ax, title, "", pr["temp_y"], pr["temp_yticks"], pr["x_ticks"], pr["x_max"])
-
-    # 1. Plot Set per primo
     ax.axhline(setval, color=_PC["set_temp"], lw=0.8, zorder=4, label="SET")
-
-    # 2. Plot Sonde
     for i, p in enumerate(params):
         if p in data:
             pts = sorted(data[p]); ys = [d[1] for d in pts]
             if not all(abs(v) < 0.01 for v in ys):
                 ax.plot([d[0] for d in pts], ys, color=_PC[i+1], lw=0.7, zorder=3, label=p)
                 continue
-        # Dummy plot
         ax.plot([], [], color=_PC[i+1], lw=0.7, label=p)
-
     h, l = ax.get_legend_handles_labels()
     ax.legend(h, l, loc="upper center", bbox_to_anchor=(0.5, -0.08), ncol=1+len(params), **_LK)
 
 def _pdf_posiz(ax, data, params, pr):
     _pdf_setup_ax(ax, "POSIZIONE [mm]", "mm", pr["posiz_y"], pr["posiz_yticks"], pr["x_ticks"], pr["x_max"], draw_bg=False)
-
-    # Nessun set qui, solo Sonde / Posizioni
     for i, p in enumerate(params):
         if p in data:
             pts = sorted(data[p])
@@ -355,15 +544,12 @@ def _pdf_posiz(ax, data, params, pr):
                 ax.plot([d[0] for d in pts], [d[1] for d in pts], color=_PC[i+1], lw=0.7, zorder=3, label=p)
                 continue
         ax.plot([], [], color=_PC[i+1], lw=0.7, label=p)
-
     ax.axhline(0, color="#999", lw=0.4, linestyle="--", zorder=2)
     h, l = ax.get_legend_handles_labels()
     ax.legend(h, l, loc="upper center", bbox_to_anchor=(0.5, -0.08), ncol=len(params), **_LK)
 
 def _pdf_forza(ax, data, params, pr):
     _pdf_setup_ax(ax, "FORZA [kN]", "kN", pr["forza_y"], pr["forza_yticks"], pr["x_ticks"], pr["x_max"], draw_bg=False)
-
-    # Determiniamo se abbiamo dei SET da plottare e li mettiamo prima
     ref = next((p for p in params if p in data), None)
     has_set = False
     if ref:
@@ -375,13 +561,10 @@ def _pdf_forza(ax, data, params, pr):
             ax.plot(xs, sps, color=_PC["set_forza"], lw=0.8, zorder=5, label="Set")
             ax.plot(xs, sps + pr["forza_delta"], color=_PC["lmax"], lw=1.0, zorder=5, label="LMax")
             ax.plot(xs, sps - pr["forza_delta"], color=_PC["lmin"], lw=1.0, zorder=5, label="LMin")
-
     if not has_set:
-        # Dummy per garantire che Set appaiano in legenda
         ax.plot([], [], color=_PC["set_forza"], lw=0.8, label="Set")
         ax.plot([], [], color=_PC["lmax"], lw=1.0, label="LMax")
         ax.plot([], [], color=_PC["lmin"], lw=1.0, label="LMin")
-
     for i, p in enumerate(params):
         lbl = f"Forza{i+1}"
         if p in data:
@@ -390,7 +573,6 @@ def _pdf_forza(ax, data, params, pr):
                 ax.plot([d[0] for d in pts], [d[1] for d in pts], color=_PC[i+1], lw=0.7, zorder=3, label=lbl)
                 continue
         ax.plot([], [], color=_PC[i+1], lw=0.7, label=lbl)
-
     h, l = ax.get_legend_handles_labels()
     ax.legend(h, l, loc="upper center", bbox_to_anchor=(0.5, -0.08), ncol=3+len(params), **_LK)
 
@@ -411,11 +593,8 @@ def _pdf_vuoto(ax, data, params, setvals, title, labels, pr, ylabel="bar", bg_xm
         bg_ymax = pr.get("vuoto_bg_ymax", None)
     _pdf_setup_ax(ax, title, ylabel, pr["vuoto_y"], pr["vuoto_yticks"], pr["x_ticks"], pr["x_max"], bg_xmax=bg_xmax, bg_ymax=bg_ymax, draw_bg=draw_bg)
     sc = ["black","#555","#888","#aaa"]
-
-    # 1. Disegna linee (reali se ci sono dati, altrimenti fuori dal grafico per la legenda)
     for j, sv in enumerate(setvals):
         ax.axhline(sv, color=sc[j%4], lw=0.7, linestyle="--", zorder=4, label=f"Set {j+1}")
-
     for i, p in enumerate(params):
         lbl = labels[i] if i < len(labels) else p
         if p in data:
@@ -423,9 +602,7 @@ def _pdf_vuoto(ax, data, params, setvals, title, labels, pr, ylabel="bar", bg_xm
             if not all(abs(v) < 0.001 for v in ys):
                 ax.plot([d[0] for d in pts], ys, color=_PC[i+1], lw=0.7, zorder=3, label=lbl)
                 continue
-        # Dummy plot per la legenda se mancano i dati
         ax.plot([], [], color=_PC[i+1], lw=0.7, label=lbl)
-
     h, l = ax.get_legend_handles_labels()
     ax.legend(h, l, loc="upper center", bbox_to_anchor=(0.5, -0.08), ncol=len(setvals)+len(params), **_LK)
 
@@ -562,7 +739,6 @@ def _persico_v8_setup_ax(ax, title, unit, ylim, yticks, xticks, bg_type="none", 
 
 
 def _persico_v8_cleg(ax, handles, labels, badge_ok=False):
-    """Leggenda sotto il grafico in coordinate assolute di figura."""
     import matplotlib.patches as _mp
     if not handles: return
     if badge_ok:
@@ -583,14 +759,12 @@ def _persico_v8_cleg(ax, handles, labels, badge_ok=False):
 
 
 def _posiz_y_auto(data, x_min=None):
-    """Calcola ylim, yticks e decimali corretti per il grafico posizione."""
     vals = [v for col in ["P1","P2","P3","P4"]
             for _sec,v,_st,_sp in data.get(col,[])
             if isinstance(v,(int,float)) and (x_min is None or _sec >= x_min)]
     if not vals:
         return (-0.35,0.05), [-0.35,-0.30,-0.25,-0.20,-0.15,-0.10,-0.05,0.0,0.05], 2
     mn,mx = min(vals),max(vals)
-    # Se tutti i valori sono negativi, ancora y1 a 0.0 (riferimento stampo chiuso)
     if mx < 0:
         y1 = 0.0
         y0 = mn - max(abs(mn)*0.20, 0.005)
@@ -598,14 +772,11 @@ def _posiz_y_auto(data, x_min=None):
         pad = max((mx-mn)*0.20, 0.005)
         y0,y1 = mn-pad, mx+pad
     rng   = y1-y0 or 0.01
-    # Step "bello": potenza di 10 scalata per avere più tick (~8-12 tick)
     exp   = math.floor(math.log10(rng/8))
     raw   = rng/8 / (10**exp)
     mult  = 1 if raw<2 else 2 if raw<5 else 5
     step  = round(mult * (10**exp), 8)
-    # Numero di decimali necessari: abbastanza per distinguere i tick
     dec   = max(0, -int(math.floor(math.log10(step)))) if step > 0 else 2
-    # Genera tick e arrotonda per evitare floating-point artifacts
     t0    = math.ceil(y0 / step) * step
     ticks = [round(t0 + i*step, dec+1) for i in range(30)
              if t0 + i*step <= y1 + step*0.01]
@@ -647,7 +818,6 @@ def _persico_v8_pages(pdf, data, meta, pr, logo_path=None):
         return [x[0] for x in pts],[x[1] for x in pts]
     FW,FH = 8.27,11.69; L,W = 0.18,0.64
 
-    # -- Pag.1: copertina + temperatura sup + inf ------------------------------
     fig = plt.figure(figsize=(FW,FH), facecolor="white")
     _persico_v8_hdr(fig, meta, pr, logo_path)
     rows_t=[("ID CICLO",str(meta.get("idciclo",""))),("SERIAL NUMBER",meta.get("partite","")),
@@ -669,7 +839,7 @@ def _persico_v8_pages(pdf, data, meta, pr, logo_path=None):
         xs,ys=gs(col)
         if xs: ax_ts.plot(xs,ys,color=c,lw=1.2,label=col.replace("TS","T"),zorder=4)
     h,l=ax_ts.get_legend_handles_labels(); _persico_v8_cleg(ax_ts,h,l,True)
-    
+
     _persico_v8_setup_ax(ax_ti,"Temperatura semistampo inferiore (°C) - Grafico",
                          "[°C]",PS["temp_y"],PS["temp_yticks"],TV,"temp", PS["temp_range"])
     ax_ti.plot([],[],color=CSP,label="SP",lw=1.2); ax_ti.axhline(PS["tsi"],color=CSP,lw=0.8,zorder=3)
@@ -677,16 +847,14 @@ def _persico_v8_pages(pdf, data, meta, pr, logo_path=None):
         xs,ys=gs(col)
         if xs: ax_ti.plot(xs,ys,color=c,lw=1.2,label=col.replace("TI","T"),zorder=4)
     h,l=ax_ti.get_legend_handles_labels(); _persico_v8_cleg(ax_ti,h,l,True)
-    
+
     pdf.savefig(fig,bbox_inches="tight",dpi=150); plt.close(fig)
 
-    # -- Pag.2: posizione (Y ADATTIVA) + forza ---------------------------------
     fig = plt.figure(figsize=(FW,FH), facecolor="white")
     _persico_v8_hdr(fig, meta, pr, logo_path)
     ax_p=fig.add_axes([L,0.48,W,0.28]); ax_f=fig.add_axes([L,0.11,W,0.28])
     _py,_pticks,_pdec = _posiz_y_auto(data)
     _persico_v8_setup_ax(ax_p,"Posizione piano (mm) - Grafico","[mm]",_py,_pticks,POS,"none")
-    # Sovrascrive formatter con la precisione calcolata sul passo reale
     ax_p.yaxis.set_major_formatter(plt.FuncFormatter(
         lambda v,_,d=_pdec: f"{v:.{d}f}".replace(".",",")))
     for c,col in zip([CT3,CT1,CT2,CT4],["P1","P2","P3","P4"]):
@@ -696,14 +864,12 @@ def _persico_v8_pages(pdf, data, meta, pr, logo_path=None):
     _persico_v8_setup_ax(ax_f,"Forza (kN) - Grafico","[kN]",
                          PS["forza_y"],PS["forza_yticks"],FORZ,"forza", PS["forza_range"])
     ax_f.axhline(PS["spc"],color=CT1,lw=1.2,label="SPC",zorder=3)
-    # Usa FC se disponibile (nativi caricati), altrimenti F1 come fallback (solo CSV)
     xs,ys=gs_skip("FC") if "FC" in data else gs_skip("F1")
     if xs: ax_f.plot(xs,ys,color=CSP,lw=1.2,label="FC",zorder=4)
     h,l=ax_f.get_legend_handles_labels(); _persico_v8_cleg(ax_f,h,l,True)
-    
+
     pdf.savefig(fig,bbox_inches="tight",dpi=150); plt.close(fig)
 
-    # -- Pag.3: vuoto superiore + inferiore ------------------------------------
     fig = plt.figure(figsize=(FW,FH), facecolor="white")
     _persico_v8_hdr(fig, meta, pr, logo_path)
     ax_vs=fig.add_axes([L,0.48,W,0.28]); ax_vi=fig.add_axes([L,0.11,W,0.28])
@@ -719,12 +885,11 @@ def _persico_v8_pages(pdf, data, meta, pr, logo_path=None):
         xs,ys=gs(col)
         if xs: ax_vi.plot(xs,ys,color=c,lw=1.2,label=col.replace("VI","V"),zorder=4)
     h,l=ax_vi.get_legend_handles_labels(); _persico_v8_cleg(ax_vi,h,l,True)
-    
+
     pdf.savefig(fig,bbox_inches="tight",dpi=150); plt.close(fig)
 
 
 def _parse_native_pack(native_paths, stampo_name=""):
-    """Legge file nativi Persico 2500T. native_paths = dict {tipo: filepath}"""
     from datetime import datetime as _dt
     def _read_wide(path):
         with open(path, encoding="utf-8", errors="replace") as f:
@@ -759,7 +924,6 @@ def _parse_native_pack(native_paths, stampo_name=""):
         keys = ["idciclo","partite","_stampo","operatore","materiale"]
         for i,k in enumerate(keys):
             if i < len(dg) and k != "_stampo": meta_patch[k] = dg[i]
-        # Filtra partita in base al profilo
         if len(dg) >= 2:
             all_parts = [p.strip() for p in dg[1].split("/") if p.strip()]
             sn = stampo_name.upper()
@@ -768,7 +932,6 @@ def _parse_native_pack(native_paths, stampo_name=""):
             elif "CENTRAL COFANGO" in sn:
                 filtered = [p for p in all_parts if "IC" in p.upper()]
             elif "SIDE COFANGO" in sn:
-                # DX = SD, SX = SS - tienile entrambe
                 filtered = [p for p in all_parts if "SD" in p.upper() or "SS" in p.upper()]
             else:
                 filtered = all_parts
@@ -779,7 +942,6 @@ def _parse_native_pack(native_paths, stampo_name=""):
             except Exception: pass
     if "FORZA" in native_paths:
         _, rows = _read_wide(native_paths["FORZA"])
-        # Legge F1÷F4 (sensori singoli) e FC (forza combinata con setpoint SPC)
         for _c in ["F1","F2","F3","F4"]:
             pts = _to_pts(rows, _c)
             if pts: data[_c] = pts
@@ -820,7 +982,6 @@ def _merge_native_data(base_data, base_meta, native_data, meta_patch):
 
 
 def _filter_partite(partite_str, stampo_name):
-    """Filtra la stringa partite in base al profilo stampo."""
     if not partite_str: return partite_str
     parts = [p.strip() for p in partite_str.replace("/",",").split(",") if p.strip()]
     sn = stampo_name.upper()
@@ -984,9 +1145,6 @@ def _validate_csv(csv_path):
     return True, ""
 
 def _autodetect_profile(csv_path):
-    """Rileva profilo stampo dal codice nella Partita (es. 26RF005449 -> RF -> Front Firewall).
-    Supporta CSV con header virgola + dati punto-e-virgola e riga REPORT GENERATED iniziale.
-    """
     _PM = {
         "VG": ("Inner Tub", None), "PS": ("Polecrasher", "SX"), "PD": ("Polecrasher", "DX"),
         "TD": ("Tub Floor Shell", "DX"), "ST": ("Tub Floor Shell", "SX"),
@@ -997,15 +1155,11 @@ def _autodetect_profile(csv_path):
         with open(csv_path, encoding="utf-8") as f:
             lines = [l for l in f.read().splitlines() if l.strip()]
         if not lines: return None, {}, []
-        # Salta riga "REPORT GENERATED ON: ..."
         start = 1 if lines[0].upper().startswith("REPORT GENERATED") else 0
         hdr_line = lines[start] if start < len(lines) else ""
-        # Indice colonna Partita (header separato da virgola)
         hdr_cols = [h.strip().strip('"') for h in hdr_line.split(",")]
         partita_idx = hdr_cols.index("Partita") if "Partita" in hdr_cols else 0
-        # Separatore dati: ";" per Persico, "," per Cannon
         data_sep = ";" if (start + 1 < len(lines) and ";" in lines[start+1]) else ","
-        # Raccolta valori Partita univoci per indice colonna
         seen = set(); partite_uniche = []
         for line in lines[start+1:]:
             parts = line.split(data_sep)
@@ -1013,7 +1167,6 @@ def _autodetect_profile(csv_path):
                 p = parts[partita_idx].strip().strip('"').upper()
                 if p and p not in seen:
                     seen.add(p); partite_uniche.append(p)
-        # Regex: "26RF005449" -> gruppo 1 = "RF"
         profili_trovati = {}
         for p in partite_uniche:
             m = re.search(r'\d{2}([A-Z]{2})\d', p)
@@ -1026,5 +1179,3 @@ def _autodetect_profile(csv_path):
         if not profili_trovati: return None, {}, partite_uniche
         return next(iter(profili_trovati)), profili_trovati, partite_uniche
     except Exception: return None, {}, []
-
-
