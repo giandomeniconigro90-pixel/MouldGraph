@@ -1318,7 +1318,6 @@ class InteractivePlotCanvas:
             # zoom-in: push stato corrente (limite a 50 livelli)
             if len(self._zoom_stack) < 50:
                 self._zoom_stack.append((xmin, xmax))
-                self._live_user_zoomed = True   # utente ha zoomato: blocca auto-scroll
             factor = 0.85
             cx = event.xdata if event.xdata else (xmin + xmax) / 2
             new_min = cx - (cx - xmin) * factor
@@ -1328,8 +1327,6 @@ class InteractivePlotCanvas:
             if not self._zoom_stack:
                 return
             new_min, new_max = self._zoom_stack.pop()
-        if not self._zoom_stack:
-                self._live_user_zoomed = False  # tornato alla vista originale
         ax.set_xlim(new_min, new_max)
         if self._ax2:
             self._ax2.set_xlim(new_min, new_max)
@@ -6438,7 +6435,6 @@ class LogAnalyzerApp(ctk.CTk):
         # Fix 1 — thread zombie: aspetta terminazione, poi verifica
         if self._live_thread is not None and self._live_thread.is_alive():
             self._live_running.clear()
-            self._live_ipc._live_user_zoomed = False  # reset zoom dopo pausa
             self._live_thread.join(timeout=2.0)
             if self._live_thread.is_alive():
                 # thread non terminato: rinuncia all'avvio per sicurezza
@@ -6456,7 +6452,6 @@ class LogAnalyzerApp(ctk.CTk):
                 
         # 🔄 RESET automatico zoom al PLAY
         self._live_ipc.reset_zoom()
-        self._live_ipc._live_user_zoomed = False  # Fix zoom: reset flag al PLAY
         self._live_ipc.clear_cursors()
         self._live_ipc._needs_full_redraw = True
         self._live_running.set()
@@ -6502,8 +6497,6 @@ class LogAnalyzerApp(ctk.CTk):
             return
         if self._live_paused.is_set():
             self._live_paused.clear()
-            self._live_ipc._live_user_zoomed = False  # Fix zoom: reset flag alla ripresa
-            self._live_ipc.reset_zoom()               # Fix zoom: ritorna alla vista completa
         else:
             self._live_paused.set()
         if self._live_paused.is_set():
@@ -6901,8 +6894,7 @@ class LogAnalyzerApp(ctk.CTk):
         self._live_ipc.update_live(xs_raw, series, x_type,self._live_col_meta, colors=colors)
         
         # ⚡ AUTO-SCROLL live: finestra scorre automaticamente
-        if (hasattr(self.master, '_live_running') and self.master._live_running.is_set()
-                and not getattr(self._live_ipc, '_live_user_zoomed', False)):
+        if hasattr(self.master, '_live_running') and self.master._live_running.is_set():
             xs_num = [self._to_num(x) for x in xs_raw if self._to_num(x) is not None]
             if xs_num:
                 last_x = max(xs_num)
