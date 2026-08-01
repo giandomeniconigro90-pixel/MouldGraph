@@ -91,7 +91,7 @@ def live_serial_thread(ser_module, queue_module, port, baud, running_event,
     """
     import time
 
-    live_queue = queue_module.Queue(maxsize=2000)
+    live_queue = existing_queue if existing_queue is not None else queue_module.Queue(maxsize=2000)
 
     if ser_module is None:
         live_queue.put({"_error": "pyserial non installato."})
@@ -165,7 +165,7 @@ def live_sim_thread(random_module, queue_module, running_event, paused_event,
     """
     import time
 
-    live_queue = queue_module.Queue(maxsize=2000)
+    live_queue = existing_queue if existing_queue is not None else queue_module.Queue(maxsize=2000)
     dropped = 0
 
     def _wait_if_paused():
@@ -304,7 +304,8 @@ def live_sim_thread(random_module, queue_module, running_event, paused_event,
 
 
 def live_serial_thread(ser_module, queue_module, port, baud, running_event,
-                        parse_line_fn, on_open_log=None, on_error_status=None):
+                        parse_line_fn, on_open_log=None, on_error_status=None,
+                        existing_queue=None):
     """Worker di lettura seriale per il tab Live Data.
 
     Estratto fedelmente da LogAnalyzerApp._live_serial_thread. Nessun
@@ -330,7 +331,7 @@ def live_serial_thread(ser_module, queue_module, port, baud, running_event,
     """
     import time
 
-    live_queue = queue_module.Queue(maxsize=2000)
+    live_queue = existing_queue if existing_queue is not None else queue_module.Queue(maxsize=2000)
 
     if ser_module is None:
         live_queue.put({"_error": "pyserial non installato."})
@@ -374,7 +375,8 @@ def live_sim_thread(random_module, queue_module, running_event, paused_event,
                      get_speed_snapshot, sim_random, csv_path,
                      is_long_cycle_csv_fn, parse_long_cycle_csv_fn,
                      parse_universal_csv_fn, uc_try_float_fn, uc_parse_dt_fn,
-                     on_log=None):
+                     on_log=None,
+                     existing_queue=None):
     """Worker di simulazione/riproduzione CSV per il tab Live Data.
 
     Estratto fedelmente da LogAnalyzerApp._live_sim_thread. Nessun
@@ -388,7 +390,7 @@ def live_sim_thread(random_module, queue_module, running_event, paused_event,
     """
     import time
 
-    live_queue = queue_module.Queue(maxsize=2000)
+    live_queue = existing_queue if existing_queue is not None else queue_module.Queue(maxsize=2000)
     dropped = 0
 
     def _wait_if_paused():
