@@ -1,0 +1,12 @@
+def parse_line(raw,idx):
+    m=PAT1.match(raw)
+    if m:return dict(n=idx+1,raw=raw,timestamp=m.group(1),ts=parse_ts(m.group(1)),level=norm_level(m.group(2)),component=m.group(3) or"-",message=m.group(4))
+    m=PAT_S.match(raw)
+    if m:return dict(n=idx+1,raw=raw,timestamp=m.group(1),ts=parse_ts(m.group(1)),level=norm_level(m.group(2)),component=m.group(3).strip() or"-",message=m.group(4).strip())
+    m=PAT2.match(raw)
+    if m:return dict(n=idx+1,raw=raw,timestamp=m.group(1),ts=parse_ts(m.group(1)),level=norm_level(m.group(2)),component="-",message=m.group(3))
+    m=PAT3.match(raw)
+    if m:return dict(n=idx+1,raw=raw,timestamp=m.group(1),ts=parse_ts(m.group(1)),level=norm_level(m.group(2)),component=m.group(3) or"-",message=m.group(4))
+    m=PAT4.match(raw)
+    if m:return dict(n=idx+1,raw=raw,timestamp=m.group(1) or"",ts=parse_ts(m.group(1)),level=norm_level(m.group(2)),component="-",message=m.group(3))
+    return dict(n=idx+1,raw=raw,timestamp="",ts=None,level="INFO",component="-",message=raw)

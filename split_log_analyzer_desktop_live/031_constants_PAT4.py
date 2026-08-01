@@ -1,0 +1,1 @@
+PAT4 = re.compile(r'^(\S.{7,}?)\s+\b(ERROR|WARNING|WARN|INFO|DEBUG|TRACE|FATAL|CRITICAL)\b\s+(.+)',re.IGNORECASE)
