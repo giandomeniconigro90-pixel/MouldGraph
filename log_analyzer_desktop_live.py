@@ -6745,33 +6745,8 @@ class LogAnalyzerApp(ctk.CTk):
 
     def _live_parse_line(self, line):
         """Parsa una riga CSV o key=val da seriale."""
-        if not line:
-            return None
-        # formato key=val,key=val,...
-        if "=" in line:
-            row = {}
-            for part in line.split(","):
-                kv = part.strip().split("=", 1)
-                if len(kv) == 2:
-                    k, v = kv[0].strip(), kv[1].strip()
-                    try:
-                        row[k] = float(v)
-                    except Exception:
-                        row[k] = v
-            return row if row else None
-        # formato CSV
-        parts = line.split(",")
-        if len(parts) < 2:
-            parts = line.split(";")
-        if self._live_headers and len(parts) == len(self._live_headers):
-            row = {}
-            for h, v in zip(self._live_headers, parts):
-                try:
-                    row[h] = float(v.strip().replace(",", "."))
-                except Exception:
-                    row[h] = v.strip()
-            return row
-        return {"_raw": line}
+from mouldgraph.live_monitor import parse_live_line
+        return parse_live_line(line, self._live_headers)
 
     # ── polling UI ───────────────────────────────────────────────────────
     def _live_poll(self):
