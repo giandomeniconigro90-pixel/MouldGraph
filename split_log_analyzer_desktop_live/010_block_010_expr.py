@@ -1,1 +1,0 @@
-matplotlib.use("Agg")

@@ -1,1 +1,0 @@
-LEVEL_HOVER  = {"ERROR":"#7a2020","WARN":"#7a5a00","INFO":"#2a5a10","DEBUG":"#104070"}
