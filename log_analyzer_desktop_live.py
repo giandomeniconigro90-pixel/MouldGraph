@@ -6558,190 +6558,31 @@ class LogAnalyzerApp(ctk.CTk):
         if _was_running:
             self.after(400, self._live_start)
 
-    # ── thread simulazione CSV ──────────────────────────────────────────
+    # — thread simulazione CSV ──────────────────────────────────────────
     def _live_sim_thread(self):
-        import time
+        """Delega a live_monitor.live_sim_thread, riusando self._live_queue."""
+        from mouldgraph.live_monitor import live_sim_thread
+        live_sim_thread(
+            random, _queue, self._live_running, self._live_paused,
+            lambda: getattr(self, "_live_speed_snapshot", "1x"),
+            getattr(self, "_live_sim_random", True), self._live_csv_path,
+            _is_long_cycle_csv, _parse_long_cycle_csv, parse_universal_csv,
+            _uc_try_float, _uc_parse_dt,
+            on_log=lambda msg: self.after(0, self._live_log_append, msg),
+            existing_queue=self._live_queue,
+        )
 
-        def _wait_if_paused():
-            """Blocca il thread finché la simulazione è in pausa."""
-            while self._live_paused.is_set() and self._live_running.is_set():
-                time.sleep(0.1)
-
-        def _speed_factor():
-            # Fix 4: legge solo lo snapshot — mai StringVar dal thread background
-            sv = getattr(self, "_live_speed_snapshot", "1x")
-            if sv == "MAX":
-                return None
-            try:
-                return float(sv.rstrip("x"))
-            except Exception:
-                return 1.0
-
-        if getattr(self, "_live_sim_random", True) or not self._live_csv_path:
-            # simulazione puramente random
-            t = 0.0
-            while self._live_running.is_set():
-                _wait_if_paused()
-                if not self._live_running.is_set():
-                    break
-                row = {"_sim_t": t,
-                       "Temperatura": round(120 + random.gauss(0, 2), 2),
-                       "Pressione":   round(5.0  + random.gauss(0, 0.3), 3),
-                       "Forza":       round(3000 + random.gauss(0, 150), 1)}
-                try:
-                    self._live_queue.put_nowait(row)
-                except _queue.Full:
-                    self._live_dropped = getattr(self, "_live_dropped", 0) + 1
-                t += 0.5
-                sf = _speed_factor()
-                time.sleep(0.5 / sf if sf else 0)
-            return
-
-        # ── riproduzione CSV ────────────────────────────────────────────
-        try:
-            if _is_long_cycle_csv(self._live_csv_path):
-                rows, headers, col_meta, numeric_cols, datetime_cols, _, _, _ = \
-                    _parse_long_cycle_csv(self._live_csv_path)
-                _has_embedded_ts = True
-                self.after(0, self._live_log_append, "Formato: Long CSV (Cannon/Persico/Krauss Maffei)")
-            else:
-                rows, headers, col_meta, numeric_cols, datetime_cols, _, _, _ = \
-                    parse_universal_csv(self._live_csv_path)
-                _has_embedded_ts = False
-        except Exception as e:
-            self._live_queue.put({"_error": str(e)})
-            return
-
-        if not numeric_cols:
-            self._live_queue.put({"_error": "Nessuna colonna numerica nel CSV."})
-            return
-
-        # ── rileva la colonna tempo ─────────────────────────────────────
-        _TIME_NAMES = {"time","tempo","t","sec","seconds","s","zeit","temps",
-                       "elapsed","elapsed_s","ts","ticks","sample"}
-        x_col_dt  = datetime_cols[0] if datetime_cols else None
-        x_col_num = None
-        if not _has_embedded_ts:
-            for h in headers:
-                if h.lower().rstrip("_") in _TIME_NAMES:
-                    sample = [rows[i].get(h, "") for i in range(min(5, len(rows)))]
-                    sample_s = [str(v) for v in sample if v is not None and str(v).strip()]
-                    if all(_uc_try_float(v) for v in sample_s):
-                        x_col_num = h
-                        break
-
-        use_datetime = _has_embedded_ts or (x_col_dt is not None)
-        use_num_time = (not use_datetime) and (x_col_num is not None)
-
-        if not _has_embedded_ts:
-            self.after(0, self._live_log_append,
-                f"Tempo: {'datetime «' + x_col_dt + '»' if use_datetime else '«' + x_col_num + '» (sec)' if use_num_time else 'indice fisso'}"
-            )
-
-        prev_dt  = None
-        prev_num = None
-
-        for i, r in enumerate(rows):
-            if not self._live_running.is_set():
-                break
-            _wait_if_paused()
-            if not self._live_running.is_set():
-                break
-
-            row_out = {}
-            for col in numeric_cols:
-                v = r.get(col)
-                if isinstance(v, float):
-                    row_out[col] = v
-                else:
-                    try:
-                        row_out[col] = float(str(v).replace(",", "."))
-                    except Exception:
-                        row_out[col] = None
-
-            sf = _speed_factor()
-
-            if _has_embedded_ts:
-                ts = r.get("_ts")
-                if ts:
-                    row_out["_ts"] = ts
-                    if prev_dt is not None and sf is not None:
-                        delta = (ts - prev_dt).total_seconds()
-                        if delta > 0:
-                            time.sleep(max(0.01, delta / sf))
-                    prev_dt = ts
-                else:
-                    if sf is not None:
-                        time.sleep(0.1 / sf)
-
-            elif use_datetime:
-                ts = _uc_parse_dt(r.get(x_col_dt, ""))
-                if ts:
-                    row_out["_ts"] = ts
-                    if prev_dt is not None and sf is not None:
-                        delta = (ts - prev_dt).total_seconds()
-                        time.sleep(max(0.01, delta / sf))
-                    prev_dt = ts
-                else:
-                    if sf is not None:
-                        time.sleep(0.1 / sf)
-
-            elif use_num_time:
-                try:
-                    t_now = float(str(r.get(x_col_num, "")).replace(",", "."))
-                    row_out["_sim_t"] = t_now
-                    if prev_num is not None and sf is not None:
-                        delta = t_now - prev_num
-                        if delta > 0:
-                            time.sleep(max(0.01, delta / sf))
-                    prev_num = t_now
-                except Exception:
-                    if sf is not None:
-                        time.sleep(0.1 / sf)
-
-            else:
-                row_out["_sim_i"] = i
-                if sf is not None:
-                    time.sleep(max(0.01, 1.0 / sf))
-
-            try:
-                self._live_queue.put_nowait(row_out)
-            except _queue.Full:
-                self._live_dropped = getattr(self, "_live_dropped", 0) + 1
-
-    # ── thread seriale reale ────────────────────────────────────────────
+    # — thread seriale reale ──────────────────────────────────────────
     def _live_serial_thread(self, port, baud):
-        if not SERIAL_AVAILABLE:
-            self._live_queue.put({"_error": "pyserial non installato."})
-            return
-        import time
-        try:
-            ser = serial.Serial(port, baud, timeout=1)
-            self.after(0, self._live_log_append, f"Seriale aperta: {port} @ {baud}")
-        except Exception as e:
-            self._live_queue.put({"_error": f"Errore apertura {port}: {e}"})
-            return
-        buf = ""
-        while self._live_running.is_set():
-            try:
-                chunk = ser.read(256).decode("utf-8", errors="replace")
-                buf += chunk
-                while "\n" in buf:
-                    line, buf = buf.split("\n", 1)
-                    row = self._live_parse_line(line.strip())
-                    if row:
-                        try:
-                            self._live_queue.put_nowait(row)  # C4: non blocca il thread
-                        except _queue.Full:
-                            self._live_dropped = getattr(self, "_live_dropped", 0) + 1
-            except Exception as e:
-                self.after(0, self._live_set_status,
-                           f"Errore seriale: {e}", COLORS["warn"])
-                time.sleep(0.05)
-        try:
-            ser.close()
-        except Exception:
-            pass
+        """Delega a live_monitor.live_serial_thread, riusando self._live_queue."""
+        from mouldgraph.live_monitor import live_serial_thread
+        live_serial_thread(
+            serial if SERIAL_AVAILABLE else None, _queue, port, baud,
+            self._live_running, self._live_parse_line,
+            on_open_log=lambda msg: self.after(0, self._live_log_append, msg),
+            on_error_status=lambda msg: self.after(0, self._live_set_status, msg, COLORS["warn"]),
+            existing_queue=self._live_queue,
+        )
 
     def _live_parse_line(self, line):
         """Parsa una riga CSV o key=val da seriale."""
