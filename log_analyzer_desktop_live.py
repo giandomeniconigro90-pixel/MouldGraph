@@ -6586,7 +6586,7 @@ class LogAnalyzerApp(ctk.CTk):
 
     def _live_parse_line(self, line):
         """Parsa una riga CSV o key=val da seriale."""
-from mouldgraph.live_monitor import parse_live_line
+        from mouldgraph.live_monitor import parse_live_line
         return parse_live_line(line, self._live_headers)
 
     # ── polling UI ───────────────────────────────────────────────────────
