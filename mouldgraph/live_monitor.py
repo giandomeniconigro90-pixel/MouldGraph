@@ -228,3 +228,35 @@ def live_sim_thread(random_module, queue_module, running_event, paused_event,
             dropped += 1
 
     return live_queue
+
+
+
+MULTI_GROUPS = [
+    ("Temp. Superiore", lambda c: c.upper().startswith("TS")),
+    ("Temp. Inferiore", lambda c: c.upper().startswith("TI")),
+    ("Temperatura", lambda c: c.upper().startswith("T") and not c.upper().startswith("TS") and not c.upper().startswith("TI")),
+    ("Forza", lambda c: c.upper().startswith("F")),
+    ("Posizione", lambda c: c.upper().startswith("P")),
+    ("Vuoto", lambda c: c.upper().startswith("V")),
+]
+
+
+def group_live_cols(cols, groups_def=None):
+    """Raggruppa le colonne per grandezza fisica.
+
+    Estratto dal monolite log_analyzer_desktop_live.py (metodo
+    LogAnalyzerApp._live_group_cols). Nessun cambiamento di comportamento.
+    """
+    if groups_def is None:
+        groups_def = MULTI_GROUPS
+    groups = {}
+    assigned = set()
+    for name, predicate in groups_def:
+        matched = [c for c in cols if predicate(c) and c not in assigned]
+        if matched:
+            groups[name] = matched
+            assigned.update(matched)
+    remaining = [c for c in cols if c not in assigned]
+    if remaining:
+        groups["Altri"] = remaining
+    return groups
