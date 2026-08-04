@@ -260,3 +260,44 @@ def group_live_cols(cols, groups_def=None):
     if remaining:
         groups["Altri"] = remaining
     return groups
+
+
+
+def check_live_alarms(rows, alarm_rules, alarm_active, alarm_count):
+    """Valuta l'ultimo campione rispetto alle soglie configurate (logica pura).
+
+    Estratto dal monolite log_analyzer_desktop_live.py (metodo
+    LogAnalyzerApp._live_check_alarms). Nessun cambiamento di comportamento:
+    stessa logica di valutazione soglie; la parte di aggiornamento GUI
+    (badge, log) resta nel monolite tramite il wrapper.
+
+    Ritorna una tupla (now_active, newly_triggered, alarm_count) dove:
+    - now_active: set delle colonne attualmente in allarme
+    - newly_triggered: lista di tuple (col, val, direction) per i nuovi scatti
+    - alarm_count: contatore totale scatti aggiornato
+    """
+    if not rows or not alarm_rules:
+        return alarm_active, [], alarm_count
+    last = rows[-1]
+    newly_triggered = []
+    now_active = set()
+    for rule in alarm_rules:
+        col = rule["col"]
+        val = last.get(col)
+        if not isinstance(val, (int, float)):
+            continue
+        lo = rule.get("lo")
+        hi = rule.get("hi")
+        in_alarm = False
+        if lo is not None and val < lo:
+            in_alarm = True
+            direction = f"< {lo}"
+        elif hi is not None and val > hi:
+            in_alarm = True
+            direction = f"> {hi}"
+        if in_alarm:
+            now_active.add(col)
+            if col not in alarm_active:
+                alarm_count += 1
+                newly_triggered.append((col, val, direction))
+    return now_active, newly_triggered, alarm_count
