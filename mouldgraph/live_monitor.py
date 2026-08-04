@@ -301,3 +301,27 @@ def check_live_alarms(rows, alarm_rules, alarm_active, alarm_count):
                 alarm_count += 1
                 newly_triggered.append((col, val, direction))
     return now_active, newly_triggered, alarm_count
+
+
+
+def export_live_rows_csv(rows, path):
+    """Scrive rows (lista di dict) su file CSV, escludendo le chiavi private (prefisso '_').
+
+    Estratto dal monolite log_analyzer_desktop_live.py (metodo
+    LogAnalyzerApp._live_export_csv) come logica pura di scrittura file.
+    Nessun cambiamento di comportamento: stessa logica, stesso output.
+    Solleva l'eccezione in caso di errore, cosi' il chiamante puo' gestire
+    l'esposizione all'utente (messagebox) senza cambiare comportamento.
+    """
+    import csv
+    seen = {}
+    for r in rows:
+        for k in r:
+            if not k.startswith("_"):
+                seen.setdefault(k, None)
+    all_keys = list(seen.keys())
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=all_keys, extrasaction="ignore")
+        writer.writeheader()
+        for r in rows:
+            writer.writerow({k: r.get(k, "") for k in all_keys})
