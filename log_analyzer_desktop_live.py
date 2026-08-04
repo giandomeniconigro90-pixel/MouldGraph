@@ -6023,18 +6023,9 @@ class LogAnalyzerApp(ctk.CTk):
     ]
 
     def _live_group_cols(self, cols):
-        """Raggruppa le colonne per grandezza fisica."""
-        groups = {}
-        assigned = set()
-        for name, predicate in self._MULTI_GROUPS:
-            matched = [c for c in cols if predicate(c) and c not in assigned]
-            if matched:
-                groups[name] = matched
-                assigned.update(matched)
-        remaining = [c for c in cols if c not in assigned]
-        if remaining:
-            groups["Altri"] = remaining
-        return groups
+        """Raggruppa le colonne per grandezza fisica. Delega a live_monitor.group_live_cols."""
+        from mouldgraph.live_monitor import group_live_cols
+        return group_live_cols(cols, self._MULTI_GROUPS)
 
     def _live_toggle_multi(self):
         self._live_multi_mode = not self._live_multi_mode
