@@ -5390,40 +5390,19 @@ class LogAnalyzerApp(ctk.CTk):
 
 
     def _live_check_alarms(self):
-        """Controlla l'ultimo campione rispetto alle soglie configurate."""
-        if not self._live_rows or not self._live_alarm_rules:
-            return
-        last = self._live_rows[-1]
-        newly_triggered = []
-        now_active = set()
-        for rule in self._live_alarm_rules:
-            col = rule["col"]
-            val = last.get(col)
-            if not isinstance(val, (int, float)):
-                continue
-            lo = rule.get("lo")
-            hi = rule.get("hi")
-            in_alarm = False
-            if lo is not None and val < lo:
-                in_alarm = True
-                direction = f"< {lo}"
-            elif hi is not None and val > hi:
-                in_alarm = True
-                direction = f"> {hi}"
-            if in_alarm:
-                now_active.add(col)
-                if col not in self._live_alarm_active:
-                    # nuovo scatto
-                    self._live_alarm_count += 1
-                    newly_triggered.append((col, val, direction))
+        """Controlla l'ultimo campione rispetto alle soglie configurate. Delega la valutazione a live_monitor.check_live_alarms."""
+        from mouldgraph.live_monitor import check_live_alarms
+        now_active, newly_triggered, self._live_alarm_count = check_live_alarms(
+            self._live_rows, self._live_alarm_rules,
+            self._live_alarm_active, self._live_alarm_count)
         # aggiorna badge
         self._live_alarm_active = now_active
         if now_active:
             self._live_alarm_badge.configure(
-                text=f"🔴  {len(now_active)} ALLARME/I  |  Totale scatti: {self._live_alarm_count}",
+                text=f"\U0001F534 {len(now_active)} ALLARME/I | Totale scatti: {self._live_alarm_count}",
                 text_color=COLORS["error"])
         else:
-            badge_txt = (f"✅  OK  |  Scatti totali: {self._live_alarm_count}"
+            badge_txt = (f"\u2705 OK | Scatti totali: {self._live_alarm_count}"
                          if self._live_alarm_count else "")
             self._live_alarm_badge.configure(
                 text=badge_txt,
@@ -5431,7 +5410,7 @@ class LogAnalyzerApp(ctk.CTk):
         # log nuovi scatti
         for col, val, direction in newly_triggered:
             self._live_log_append(
-                f"⚠ ALLARME [{col}] = {val:.4g} {direction}", scroll=True)
+                f"\u26A0 ALLARME [{col}] = {val:.4g} {direction}", scroll=True)
 
     def _live_add_alarm_rule(self):
         """Dialogo per aggiungere una soglia di allarme."""
