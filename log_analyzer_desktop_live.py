@@ -6865,19 +6865,9 @@ class LogAnalyzerApp(ctk.CTk):
             title="Salva dati live come CSV")
         if not path:
             return
-        # raccoglie tutte le chiavi non private (O(n) con dict per preservare l'ordine)
-        seen = {}
-        for r in self._live_rows:
-            for k in r:
-                if not k.startswith("_"):
-                    seen.setdefault(k, None)
-        all_keys = list(seen.keys())
+        from mouldgraph.live_monitor import export_live_rows_csv
         try:
-            with open(path, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=all_keys, extrasaction="ignore")
-                writer.writeheader()
-                for r in self._live_rows:
-                    writer.writerow({k: r.get(k, "") for k in all_keys})
+            export_live_rows_csv(self._live_rows, path)
             messagebox.showinfo("Esporta", f"Salvato: {path}")
         except Exception as e:
             messagebox.showerror("Errore", str(e))
