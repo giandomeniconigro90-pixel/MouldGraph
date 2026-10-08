@@ -3774,9 +3774,12 @@ class LogAnalyzerApp(ctk.CTk):
 
         # -- Background statico per blit --
         _bg = [None]
-        def _save_bg():
+        def _save_bg(event=None):
+            # Ogni redraw (toolbar, zoom, resize) cambia lo sfondo del mirino.
             _bg[0] = canvas.copy_from_bbox(fig.bbox)
-        win.after(100, _save_bg)
+
+        def _invalidate_bg(event=None):
+            _bg[0] = None
 
         # -- Artisti overlay (animated=True → esclusi dal draw statico) --
         _vline, = ax.plot([], [], color="#ffffff", lw=0.7, linestyle="--", alpha=0.5, animated=True)
@@ -3795,9 +3798,11 @@ class LogAnalyzerApp(ctk.CTk):
             xl = ax.get_xlim(); yl = ax.get_ylim()
             xfrac = (bx - xl[0]) / (xl[1] - xl[0]) if xl[1] != xl[0] else 0.5
             yfrac = (by - yl[0]) / (yl[1] - yl[0]) if yl[1] != yl[0] else 0.5
-            ox = -120 if xfrac > 0.75 else 15
-            oy = -60  if yfrac > 0.70 else 15
-            _tooltip.xyann = (ox, oy)
+            right = xfrac > 0.65
+            top = yfrac > 0.65
+            _tooltip.set_ha("right" if right else "left")
+            _tooltip.set_va("top" if top else "bottom")
+            _tooltip.xyann = (-12 if right else 12, -12 if top else 12)
         _info_box = ax.text(0.01, 0.98, "", transform=ax.transAxes,
                             va="top", ha="left", fontsize=8.5, color="#e8eaf6",
                             bbox=dict(boxstyle="round,pad=0.5", fc="#1a1d27",
@@ -3814,9 +3819,16 @@ class LogAnalyzerApp(ctk.CTk):
             if _bg[0] is not None:
                 canvas.restore_region(_bg[0])
                 canvas.blit(fig.bbox)
+            else:
+                canvas.draw_idle()
+
+        # Gli artisti animated non entrano nello sfondo statico.
+        canvas.mpl_connect("draw_event", _save_bg)
+        canvas.mpl_connect("resize_event", _invalidate_bg)
 
         def _interp_y(xs_arr, ys_arr, x):
             if len(xs_arr) == 0: return None
+            if x < xs_arr[0] or x > xs_arr[-1]: return None
             idx = np.searchsorted(xs_arr, x)
             if idx == 0: return float(ys_arr[0])
             if idx >= len(xs_arr): return float(ys_arr[-1])
@@ -3834,7 +3846,15 @@ class LogAnalyzerApp(ctk.CTk):
             return float(xs_arr[idx]), float(ys_arr[idx]), float(dists[idx])
 
         def _on_motion(event):
-            if event.inaxes != ax or _bg[0] is None: return
+            if event.inaxes != ax:
+                _clear_overlay()
+                return
+            # La toolbar deve avere il controllo esclusivo durante zoom/pan.
+            if toolbar.mode or event.button is not None:
+                _clear_overlay()
+                return
+            if _bg[0] is None:
+                canvas.draw()
             mode = _hover_mode.get()
             if mode == "Nessuno": return
             x, y = event.xdata, event.ydata
@@ -3859,7 +3879,7 @@ class LogAnalyzerApp(ctk.CTk):
             elif mode == "Crosshair":
                 _vline.set_data([x, x], [yl[0], yl[1]])
                 _hline.set_data([xl[0], xl[1]], [y, y])
-                lines = [f"X: {x:.1f} s"]
+                lines = [f"X: {x:.1f} s · valori interpolati"]
                 for param, (xs_arr, ys_arr, _c) in _series.items():
                     iv = _interp_y(xs_arr, ys_arr, x)
                     if iv is not None: lines.append(f"{param}: {iv:.4g}")
@@ -3898,7 +3918,7 @@ class LogAnalyzerApp(ctk.CTk):
                     _snap_dot.set_data([best_x], [best_y]); _snap_dot.set_color(best_color)
                 else:
                     _snap_dot.set_data([], [])
-                lines = [f"X: {x:.1f} s"]
+                lines = [f"X: {x:.1f} s · valori interpolati"]
                 for param, (xs_arr, ys_arr, _c) in _series.items():
                     iv = _interp_y(xs_arr, ys_arr, x)
                     marker = " ◀" if param == best_param else ""
@@ -3906,23 +3926,25 @@ class LogAnalyzerApp(ctk.CTk):
                 _info_box.set_text("\n".join(lines)); _info_box.set_visible(True)
                 ax.draw_artist(_vline); ax.draw_artist(_hline)
                 ax.draw_artist(_snap_dot); ax.draw_artist(_info_box)
-            canvas.blit(ax.bbox)
+            canvas.blit(fig.bbox)
 
         def _on_leave(event):
             _clear_overlay()
 
         canvas.mpl_connect("motion_notify_event", _on_motion)
         canvas.mpl_connect("axes_leave_event", _on_leave)
+        canvas.mpl_connect("figure_leave_event", _on_leave)
+        canvas.mpl_connect("button_press_event", _on_leave)
 
         # -- Limiti originali --
         _orig_xlim = list(ax.get_xlim())
         _orig_ylim = list(ax.get_ylim())
-        _zoomed = [False]
 
         # -- Zoom rotella: out solo se già zoomato, clamp ai limiti originali --
         def _on_scroll(event):
-            if event.inaxes is None: return
-            if event.button == "down" and not _zoomed[0]: return
+            if event.inaxes != ax or toolbar.mode: return
+            if event.button not in ("up", "down"): return
+            if event.xdata is None or event.ydata is None: return
             factor = 0.85 if event.button == "up" else 1.0 / 0.85
             xl = list(ax.get_xlim()); yl = list(ax.get_ylim())
             cx = event.xdata; cy = event.ydata
@@ -3931,21 +3953,17 @@ class LogAnalyzerApp(ctk.CTk):
             if event.button == "down":
                 new_xl[0] = max(new_xl[0], _orig_xlim[0]); new_xl[1] = min(new_xl[1], _orig_xlim[1])
                 new_yl[0] = max(new_yl[0], _orig_ylim[0]); new_yl[1] = min(new_yl[1], _orig_ylim[1])
-                if (abs(new_xl[0]-_orig_xlim[0]) < 1e-6 and abs(new_xl[1]-_orig_xlim[1]) < 1e-6 and
-                    abs(new_yl[0]-_orig_ylim[0]) < 1e-6 and abs(new_yl[1]-_orig_ylim[1]) < 1e-6):
-                    _zoomed[0] = False
             else:
-                _zoomed[0] = True
                 new_xl[0] = max(new_xl[0], _orig_xlim[0]); new_xl[1] = min(new_xl[1], _orig_xlim[1])
                 new_yl[0] = max(new_yl[0], _orig_ylim[0]); new_yl[1] = min(new_yl[1], _orig_ylim[1])
             if new_xl[1] > new_xl[0] and new_yl[1] > new_yl[0]:
                 ax.set_xlim(new_xl); ax.set_ylim(new_yl)
-                canvas.draw()
-                _save_bg()
+                canvas.draw_idle()
 
         # -- Pan limitato: X e Y non scendono sotto i limiti originali --
         _clamping = [False]
         def _on_xlim_change(ax_changed):
+            _invalidate_bg()
             if _clamping[0]: return
             xl = list(ax_changed.get_xlim())
             if xl[0] < _orig_xlim[0]:
@@ -3953,6 +3971,7 @@ class LogAnalyzerApp(ctk.CTk):
                 ax_changed.set_xlim(_orig_xlim[0], xl[1] + (_orig_xlim[0] - xl[0]))
                 _clamping[0] = False
         def _on_ylim_change(ax_changed):
+            _invalidate_bg()
             if _clamping[0]: return
             yl = list(ax_changed.get_ylim())
             if yl[0] < _orig_ylim[0]:
@@ -3963,7 +3982,26 @@ class LogAnalyzerApp(ctk.CTk):
         ax.callbacks.connect("xlim_changed", _on_xlim_change)
         ax.callbacks.connect("ylim_changed", _on_ylim_change)
         canvas.mpl_connect("scroll_event", _on_scroll)
-        canvas.mpl_connect("resize_event", lambda e: (canvas.draw(), _save_bg()))
+
+        def _reset_view():
+            if toolbar.mode == "pan/zoom":
+                toolbar.pan()
+            elif toolbar.mode == "zoom rect":
+                toolbar.zoom()
+            ax.set_xlim(_orig_xlim)
+            ax.set_ylim(_orig_ylim)
+            _clear_overlay()
+            canvas.draw_idle()
+
+        tk.Button(mode_bar, text="Vista completa", command=_reset_view,
+                  bg="#22263a", fg="#e8eaf6", relief="flat",
+                  font=("Segoe UI", 10), padx=10).pack(side="right", padx=8, pady=4)
+        tk.Label(win,
+                 text="Rotella: zoom sul puntatore · Toolbar: Zoom / Sposta · "
+                      "Disattiva lo strumento per leggere i valori · Esc: nascondi mirino",
+                 bg="#1a1d27", fg="#8892b0", font=("Segoe UI", 9)).pack(side="bottom", fill="x")
+        win.bind("<Escape>", lambda event: _set_mode("Nessuno"))
+        canvas.draw()
 
     def _grafici_save_note(self):
         """Salva la nota corrente nel file JSON locale."""
