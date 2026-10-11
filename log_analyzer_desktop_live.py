@@ -65,7 +65,7 @@ PAT1 = re.compile(r'^\[?(\d{4}-\d{2}-\d{2}[\sT]\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)\]?
 PAT_S= re.compile(r'^(\d{2}[./]\d{2}[./]\d{4}\s+\d{2}:\d{2}:\d{2})\s*[|;,]\s*(ERROR|ALARM|ALARM_URGENT|WARNING|WARN|INFO|DEBUG|OK)\s*[|;,]\s*([^|;,]*)[|;,]?\s*(.*)',re.IGNORECASE)
 PAT2 = re.compile(r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)\s+(ERROR|WARNING|WARN|INFO|DEBUG|TRACE|FATAL|CRITICAL)\s+(.*)',re.IGNORECASE)
 PAT3 = re.compile(r'^(\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+(ERROR|WARNING|WARN|INFO|DEBUG|TRACE|FATAL|CRITICAL)\s+(?:\[([^\]]+)\]\s+)?(.*)',re.IGNORECASE)
-PAT4 = re.compile(r'^(\S.{7,}?)\s+\b(ERROR|WARNING|WARN|INFO|DEBUG|TRACE|FATAL|CRITICAL)\b\s+(.+)',re.IGNORECASE)
+PAT4 = re.compile(r'^(\S.*?)\s+\b(ERROR|WARNING|WARN|INFO|DEBUG|TRACE|FATAL|CRITICAL)\b\s+(.*)',re.IGNORECASE)
 
 def norm_level(l):
     l=l.upper()
@@ -98,20 +98,13 @@ def parse_line(raw,idx):
 def parse_log(text):
     return[parse_line(l,i) for i,l in enumerate([x for x in text.splitlines() if x.strip()])]
 
-_RE_IP    = re.compile(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}')
-_RE_UID   = re.compile(r'user_id=\d+')
-_RE_OID   = re.compile(r'order_id=\d+')
-_RE_EMAIL = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
-_RE_NUM   = re.compile(r'\b\d{4,}\b')
-_RE_WS    = re.compile(r'\s+')
-
 def norm_sig(msg):
-    msg=_RE_IP.sub('<IP>',msg)
-    msg=_RE_UID.sub('user_id=<ID>',msg)
-    msg=_RE_OID.sub('order_id=<ID>',msg)
-    msg=_RE_EMAIL.sub('<EMAIL>',msg)
-    msg=_RE_NUM.sub('<NUM>',msg)
-    return _RE_WS.sub(' ',msg).strip()
+    msg=re.sub(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}','<IP>',msg)
+    msg=re.sub(r'user_id=\d+','user_id=<ID>',msg)
+    msg=re.sub(r'order_id=\d+','order_id=<ID>',msg)
+    msg=re.sub(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}','<EMAIL>',msg)
+    msg=re.sub(r'\b\d{4,}\b','<NUM>',msg)
+    return re.sub(r'\s+',' ',msg).strip()
 
 def ai_analysis(parsed):
     if not parsed:return[]
@@ -232,9 +225,7 @@ def detect_anomalies(rows,headers):
     # deduplica ravvicinati
     seen=set();out=[]
     for a in anomalies:
-        # dedup per (tipo, colonna) — evita flood su sensori rumorosi
-        col_key = a[1].split('[')[0].strip()
-        key=(a[0], col_key)
+        key=(a[0],a[1][:30])
         if key not in seen:seen.add(key);out.append(a)
     return out,stats
 
@@ -447,7 +438,7 @@ def _parse_long_cycle_csv(filepath):
     _sep = ";" if _data_line.count(";") > _data_line.count(",") else ","
     
     # header SEMPRE split con virgola
-    hdr_cols = [h.strip() for h in hdr_line.split(_sep)]
+    hdr_cols = [h.strip() for h in hdr_line.split(",")]
 
     # indici colonne chiave
     try:
@@ -1327,7 +1318,6 @@ class InteractivePlotCanvas:
             # zoom-in: push stato corrente (limite a 50 livelli)
             if len(self._zoom_stack) < 50:
                 self._zoom_stack.append((xmin, xmax))
-                self._live_user_zoomed = True   # utente ha zoomato: blocca auto-scroll
             factor = 0.85
             cx = event.xdata if event.xdata else (xmin + xmax) / 2
             new_min = cx - (cx - xmin) * factor
@@ -1337,8 +1327,6 @@ class InteractivePlotCanvas:
             if not self._zoom_stack:
                 return
             new_min, new_max = self._zoom_stack.pop()
-        if not self._zoom_stack:
-                self._live_user_zoomed = False  # tornato alla vista originale
         ax.set_xlim(new_min, new_max)
         if self._ax2:
             self._ax2.set_xlim(new_min, new_max)
@@ -1452,6 +1440,7 @@ class InteractivePlotCanvas:
             _add(line_b); _add(txt_b)
 
         if self._cur_a is not None and self._cur_b is not None:
+            import numpy as _np
             _md = mdates
             xa, xb = sorted([self._cur_a, self._cur_b])
             xs_num = self._to_num(self._xs_raw)
@@ -1474,10 +1463,10 @@ class InteractivePlotCanvas:
                 xf, yf = self._clean(xs_num, ys)
                 if not xf:
                     continue
-                xarr = np.array(xf)
-                yarr = np.array(yf)
+                xarr = _np.array(xf)
+                yarr = _np.array(yf)
                 def _interp(xq):
-                    i = int(np.searchsorted(xarr, xq))
+                    i = int(_np.searchsorted(xarr, xq))
                     if i == 0: return float(yarr[0])
                     if i >= len(xarr): return float(yarr[-1])
                     x0, x1 = xarr[i-1], xarr[i]
@@ -2590,22 +2579,14 @@ def _pdf_hdr_g_ff(fig, n, meta):
 # -- PERSICO V8 PDF -------------------------------------------------------------
 
 def _persico_v8_hdr(fig, meta, pr, logo_path=None):
-    try:
-        from PIL import Image as _PIL_img
-        _pil_ok = True
-    except ImportError:
-        _pil_ok = False
+    import numpy as _np
+    from PIL import Image as _PIL
     try:
         lp = logo_path or os.path.join(os.path.dirname(os.path.abspath(__file__)), "lamborghini_logo.png")
         if not os.path.exists(lp): lp = lp.replace(".png", ".jpg")
         if lp and os.path.exists(lp):
             ax_l = fig.add_axes([0.18, 0.87, 0.08, 0.06], frameon=False)
-            if _pil_ok:
-                ax_l.imshow(np.array(_PIL_img.open(lp).convert("RGBA")))
-            else:
-                ax_l.text(0.5, 0.5, "Logo\nnon disp.", ha="center", va="center",
-                          fontsize=8, color="#aaa", transform=ax_l.transAxes)
-            ax_l.axis("off")
+            ax_l.imshow(_np.array(_PIL.open(lp).convert("RGBA"))); ax_l.axis("off")
     except Exception: pass
     fig.text(0.50,0.915,"automobili",fontsize=15,ha="center",va="center",style="italic",family="serif")
     fig.text(0.50,0.890,"Lamborghini",fontsize=24,ha="center",va="center",style="italic",family="serif",fontweight="bold")
@@ -3064,7 +3045,7 @@ def _validate_csv(csv_path):
             lines = [l for l in f.read().splitlines() if l.strip()]
         start = 1 if lines and lines[0].upper().startswith("REPORT GENERATED") else 0
         hdr_line = lines[start] if start < len(lines) else ""
-        headers = set(h.strip() for h in hdr_line.split(_sep))
+        headers = set(h.strip() for h in hdr_line.split(","))
         missing = REQUIRED_COLUMNS - headers
         if missing: return False, f"Colonne mancanti: {', '.join(sorted(missing))}"
     except Exception as e:
@@ -3089,7 +3070,7 @@ def _autodetect_profile(csv_path):
         start = 1 if lines[0].upper().startswith("REPORT GENERATED") else 0
         hdr_line = lines[start] if start < len(lines) else ""
         # Indice colonna Partita (header separato da virgola)
-        hdr_cols = [h.strip().strip('"') for h in hdr_line.split(_sep)]
+        hdr_cols = [h.strip().strip('"') for h in hdr_line.split(",")]
         partita_idx = hdr_cols.index("Partita") if "Partita" in hdr_cols else 0
         # Separatore dati: ";" per Persico, "," per Cannon
         data_sep = ";" if (start + 1 < len(lines) and ";" in lines[start+1]) else ","
@@ -3682,6 +3663,7 @@ class LogAnalyzerApp(ctk.CTk):
         data = self._grafici_merged_data or self._grafici_data
         if not data: return
 
+        import numpy as _np
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
         import matplotlib.pyplot as _plt
 
@@ -3740,7 +3722,7 @@ class LogAnalyzerApp(ctk.CTk):
             xs = [p[0] for p in pts]
             color = _SERIES_COLORS.get(param, "#6c63ff")
             ax.plot(xs, ys, color=color, lw=1.2, label=param)
-            _series[param] = (np.array(xs), np.array(ys), color)
+            _series[param] = (_np.array(xs), _np.array(ys), color)
             has_data = True
         if has_data:
             ax.legend(loc="upper right", fontsize=9, framealpha=0.8,
@@ -3817,7 +3799,7 @@ class LogAnalyzerApp(ctk.CTk):
 
         def _interp_y(xs_arr, ys_arr, x):
             if len(xs_arr) == 0: return None
-            idx = np.searchsorted(xs_arr, x)
+            idx = _np.searchsorted(xs_arr, x)
             if idx == 0: return float(ys_arr[0])
             if idx >= len(xs_arr): return float(ys_arr[-1])
             x0, x1 = xs_arr[idx-1], xs_arr[idx]
@@ -3827,10 +3809,10 @@ class LogAnalyzerApp(ctk.CTk):
 
         def _nearest_point(xs_arr, ys_arr, x, y, ax_obj):
             if len(xs_arr) == 0: return None, None, None
-            disp = ax_obj.transData.transform(np.column_stack([xs_arr, ys_arr]))
+            disp = ax_obj.transData.transform(_np.column_stack([xs_arr, ys_arr]))
             cx, cy = ax_obj.transData.transform([[x, y]])[0]
-            dists = np.hypot(disp[:, 0] - cx, disp[:, 1] - cy)
-            idx = int(np.argmin(dists))
+            dists = _np.hypot(disp[:, 0] - cx, disp[:, 1] - cy)
+            idx = int(_np.argmin(dists))
             return float(xs_arr[idx]), float(ys_arr[idx]), float(dists[idx])
 
         def _on_motion(event):
@@ -6453,7 +6435,6 @@ class LogAnalyzerApp(ctk.CTk):
         # Fix 1 — thread zombie: aspetta terminazione, poi verifica
         if self._live_thread is not None and self._live_thread.is_alive():
             self._live_running.clear()
-            self._live_ipc._live_user_zoomed = False  # reset zoom dopo pausa
             self._live_thread.join(timeout=2.0)
             if self._live_thread.is_alive():
                 # thread non terminato: rinuncia all'avvio per sicurezza
@@ -6471,7 +6452,6 @@ class LogAnalyzerApp(ctk.CTk):
                 
         # 🔄 RESET automatico zoom al PLAY
         self._live_ipc.reset_zoom()
-        self._live_ipc._live_user_zoomed = False  # Fix zoom: reset flag al PLAY
         self._live_ipc.clear_cursors()
         self._live_ipc._needs_full_redraw = True
         self._live_running.set()
@@ -6517,8 +6497,6 @@ class LogAnalyzerApp(ctk.CTk):
             return
         if self._live_paused.is_set():
             self._live_paused.clear()
-            self._live_ipc._live_user_zoomed = False  # Fix zoom: reset flag alla ripresa
-            self._live_ipc.reset_zoom()               # Fix zoom: ritorna alla vista completa
         else:
             self._live_paused.set()
         if self._live_paused.is_set():
@@ -6916,8 +6894,7 @@ class LogAnalyzerApp(ctk.CTk):
         self._live_ipc.update_live(xs_raw, series, x_type,self._live_col_meta, colors=colors)
         
         # ⚡ AUTO-SCROLL live: finestra scorre automaticamente
-        if (hasattr(self.master, '_live_running') and self.master._live_running.is_set()
-                and not getattr(self._live_ipc, '_live_user_zoomed', False)):
+        if hasattr(self.master, '_live_running') and self.master._live_running.is_set():
             xs_num = [self._to_num(x) for x in xs_raw if self._to_num(x) is not None]
             if xs_num:
                 last_x = max(xs_num)
