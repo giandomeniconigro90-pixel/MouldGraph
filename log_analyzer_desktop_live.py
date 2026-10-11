@@ -830,91 +830,54 @@ class InteractivePlotCanvas:
         self._rebuild_legend_sidebar()  # mostra bottoni ② nel pannello
 
     def update_live(self, xs_raw, series, x_type, col_meta, colors=None,
-                    background=False):
-        """Redraw incrementale per Live Data."""
+                    background=False, connect_lines=True):
+        """Aggiorna tutti i campioni, anche quando cambia solo il tempo."""
+        locked = getattr(self, "_live_user_zoomed", False)
+        limits = (self._ax1.get_xlim(), self._ax1.get_ylim()) if locked else None
         needs_full = (getattr(self, "_needs_full_redraw", False)
-                      or set(series.keys()) != set(self._lines.keys())
-                      or not self._lines)
+                      or set(series) != set(self._lines) or not self._lines)
         if needs_full:
+            stack = list(getattr(self, "_zoom_stack", []))
+            hidden = set(self._hidden)
             self._needs_full_redraw = False
             self.set_data(xs_raw, series, x_type, col_meta, colors=colors)
-            return
-
-        # Fix B: salta il draw se i dati non sono cambiati
-        # confronta lunghezza e ultimo valore di ogni serie come fingerprint veloce
-        new_fp = (len(xs_raw),
-                  tuple((k, len(v), v[-1] if v else None)
-                        for k, v in series.items()))
-        if new_fp == getattr(self, "_live_data_fp", None):
-            return
-        self._live_data_fp = new_fp
-
-        self._xs_raw        = xs_raw
-        self._xs_num_cache  = None  # B1: invalida cache
-        self._series   = series
-        self._x_type   = x_type
-        self._col_meta = col_meta
-
-        # aggiorna mappa colori se fornita
-        if colors:
-            for col, c in colors.items():
-                if col in self._colors and self._colors[col] != c:
-                    self._colors[col] = c
-                    if col in self._lines:
-                        self._lines[col].set_color(c)
-
-        # ── pulisce artisti animati
-        if self._cross_v is not None:
-            try:
-                self._cross_v.set_xdata([])
-                self._cross_v.set_ydata([])
-            except Exception:
-                pass
-            self._cross_v = None
-        for dot in self._dot_artists:
-            try:
-                dot.set_xdata([])
-                dot.set_ydata([])
-            except Exception:
-                pass
-        self._dot_artists = []
-        if self._tooltip is not None:
-            try:
-                self._tooltip.set_visible(False)
-            except Exception:
-                pass
-            self._tooltip = None
-
-        xs_num = self._to_num(xs_raw)
-        ax1 = self._ax1
-
-        for col, line in self._lines.items():
-            ys = series.get(col, [])
-            xf, yf = self._clean(xs_num, ys)
-            if xf:
-                line.set_xdata(xf)
-                line.set_ydata(yf)
-
-        # se ci sono serie nascoste ricalcola i limiti solo sulle visibili
-        if self._hidden:
-            self._rescale_visible()
+            if locked: self._zoom_stack = stack
+            self._hidden = hidden.intersection(series)
+            for col, line in self._lines.items(): line.set_visible(col not in self._hidden)
+            self._rebuild_legend_sidebar()
         else:
-            ax1.relim()
-            ax1.autoscale_view()
+            self._xs_raw = xs_raw
+            self._xs_num_cache = None
+            self._series = series
+            self._x_type = x_type
+            self._col_meta = col_meta
+        self._clear_hover()
+        xs_num = self._to_num(xs_raw)
+        for col, line in self._lines.items():
+            pairs = [(x, y) for x, y in zip(xs_num, series.get(col, [])) if x is not None]
+            xf = [x for x, _ in pairs]
+            yf = [float(y) if y is not None else float("nan") for _, y in pairs]
+            line.set_data(xf, yf)  # svuota anche una serie ora senza valori
+            line.set_linestyle("-" if connect_lines else "None")
+            line.set_marker("o" if self.show_markers or not connect_lines else "None")
+            if colors and col in colors:
+                self._colors[col] = colors[col]
+                line.set_color(colors[col])
+        if limits:
+            self._ax1.set_xlim(limits[0]); self._ax1.set_ylim(limits[1])
+        else:
+            # set_xlim/set_ylim durante lo zoom disabilitano autoscale.
+            self._ax1.set_autoscale_on(True)
+            self._ax1.relim(visible_only=True); self._ax1.autoscale_view()
             if self._ax2:
-                self._ax2.relim()
-                self._ax2.autoscale_view()
-
+                self._ax2.set_autoscale_on(True)
+                self._ax2.relim(visible_only=True); self._ax2.autoscale_view()
         if x_type == "datetime":
-            self._fmt_xaxis_datetime(ax1, xs_num)
-
+            self._fmt_xaxis_datetime(self._ax1, xs_num)
         self._drawing = True
         try:
-            if background:
-                self._canvas.draw_idle()
-            else:
-                self._canvas.draw()
-                self._bg_cache = self._canvas.copy_from_bbox(self._fig.bbox)
+            self._canvas.draw()
+            self._bg_cache = self._canvas.copy_from_bbox(self._fig.bbox)
         finally:
             self._drawing = False
 
@@ -3132,6 +3095,16 @@ class LogAnalyzerApp(ctk.CTk):
         self._live_running      = threading.Event()  # set=in corso, clear=fermo
         self._live_paused       = threading.Event()  # set=in pausa, clear=attivo
         self._live_thread       = None
+        self._live_stop_event   = threading.Event()
+        self._live_done_event   = threading.Event()
+        self._live_poll_job     = None
+        self._live_worker_error = None
+        self._live_archive     = None
+        self._live_archive_keys = {}
+        self._live_total       = 0
+        self._live_load_id     = 0
+        self._live_loading     = False
+        self.protocol("WM_DELETE_WINDOW", self._live_close)
         self._live_rows         = []     # {col: val, …} accumulati
         self._live_headers      = []
         self._live_col_meta     = {}
@@ -4256,27 +4229,27 @@ class LogAnalyzerApp(ctk.CTk):
               "Le colonne numeriche appaiono nelle pillole Colonne Y.",
               "File: FORZA_21103.CSV  ->  colonna tempo Time in secondi, 8 colonne numeriche")
         _card("▶", "Avvia, Pausa, Stop",
-              "Pulsante verde (triangolo): avvia. I dati vecchi vengono azzerati.\n"
-              "Pulsante giallo (pausa): blocca il thread, grafico fermo.\n"
+              "Pulsante verde: nuova sessione, con proposta di esportazione della precedente.\n"
+              "Pausa: ferma il CSV; su seriale ferma la vista ma continua a registrare.\n"
               "Pulsante rosso (stop): termina la sessione.\n"
               "Ad ogni nuovo Avvia la sessione riparte da zero.",
-              "Avvia  ->  acquisizione  ->  Pausa  ->  Avvia riprende  ->  Stop fine")
+              "Avvia -> Pausa -> stesso pulsante per riprendere -> Stop")
         _card("⚡", "Velocita' simulazione",
               "1x = tempo reale  |  10x = 10 volte piu' veloce  |  60x = molto veloce  |  MAX = istantaneo.\n"
               "Modificabile anche durante la simulazione in corso.",
-              "Ciclo FORZA_21103 (1496s):  1x -> 25min  |  10x -> 2.5min  |  60x -> 25s  |  MAX -> 2s")
-        _card("〰", "Interpolazione (Interp)",
-              "Attivando Interp, ogni 200ms viene calcolato un punto intermedio tra i campioni reali "
-              "per animare la curva. I punti interpolati NON vengono salvati nell'export CSV.",
-              "Campione t=23s: F1=162.1  ->  interpolato t=23.2s: F1=162.15  ->  t=23.4s: 162.2")
+              "Ciclo 1496s: 1x circa 25min; MAX dipende dal computer e dai grafici attivi.")
+        _card("〰", "Linee tra campioni",
+              "Linee collega i campioni reali. Disattivandolo vengono mostrati solo i punti. "
+              "Non vengono aggiunte misure simulate.",
+              "Campioni a 23s e 24s: una linea li collega, senza aggiungere misure.")
         _card("🔴", "Allarmi live",
               "Clicca + Soglia nel pannello destra. Scegli colonna, Lo (minimo) e/o Hi (massimo). "
               "Al primo scatto appare il badge rosso e viene loggato il momento. "
               "Azzera rimuove tutte le regole e azzera i contatori.",
               "Colonna: FC  |  Lo: 6400  |  Hi: 6600\n"
-              "-> [02:35:12] ALLARME [FC] = 6546.4 > 6600")
+              "-> [02:35:12] ALLARME [FC] = 6646.4 > 6600")
         _card("💾", "Export Live",
-              "CSV: salva tutti i campioni reali con intestazioni.\n"
+              "CSV: salva tutta la sessione, inclusi _ts (data/ora), _sim_t (secondi) o _sim_i (indice).\n"
               "PNG: salva il grafico corrente ad alta risoluzione.",
               "File: live_20260321_023512.csv  (108 righe x 8 colonne)")
 
@@ -5647,12 +5620,7 @@ class LogAnalyzerApp(ctk.CTk):
         fig, axes = plt.subplots(nrows, ncols,
                                  figsize=(10 * ncols, 4 * nrows),
                                  facecolor="#1e1e2e")
-        if n == 1:
-            axes = [axes]
-        elif ncols == 1:
-            axes = list(axes)
-        else:
-            axes = [ax for row in axes for ax in (row if hasattr(row, '__iter__') else [row])]
+        axes = list(np.atleast_1d(axes).ravel())
 
         palette = list(_UC_SERIES_PALETTE)
         colors = {col: palette[i % len(palette)]
@@ -5851,13 +5819,15 @@ class LogAnalyzerApp(ctk.CTk):
             command=self._live_toggle_multi)
         self._live_multi_btn.pack(side="left", padx=3, pady=7)
 
+        ctk.CTkButton(row3, text="Torna al live", width=85, height=28,
+                      fg_color=COLORS["surface2"], command=self._live_follow_view).pack(side="left", padx=3)
         # separatore
         ctk.CTkFrame(row3, width=1, height=24,
                      fg_color=COLORS["border"]).pack(side="left", padx=6, pady=7)
 
         # ── parametri (parte destra row3) ────────────────────────────────
         LBL = dict(font=("Segoe UI", 9), text_color=COLORS["text2"])
-        ctk.CTkLabel(row3, text="Max pt", **LBL).pack(side="left", padx=(2, 2))
+        ctk.CTkLabel(row3, text="Vista ≤500", **LBL).pack(side="left", padx=(2, 2))
         self._live_maxpts_var = ctk.StringVar(value="500")
         ctk.CTkEntry(row3, textvariable=self._live_maxpts_var, width=48,
                      fg_color=COLORS["surface2"], text_color=COLORS["text"],
@@ -5879,8 +5849,9 @@ class LogAnalyzerApp(ctk.CTk):
                           text_color=COLORS["text"],
                           command=_on_speed_change).pack(side="left", padx=(0, 6))
 
-        self._live_interp_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(row3, text="Interp", variable=self._live_interp_var,
+        self._live_interp_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(row3, text="Linee", variable=self._live_interp_var,
+                        command=self._live_refresh_plot,
                         font=("Segoe UI", 9), text_color=COLORS["text2"],
                         fg_color=COLORS["accent"], hover_color="#5a52e0",
                         checkmark_color=COLORS["text"],
@@ -6141,9 +6112,12 @@ class LogAnalyzerApp(ctk.CTk):
                                           fg_color=COLORS["surface2"],
                                           hover_color="#3a9a10", **MBTN)
 
-                def _make_ctrl(st=state, pb=play_btn, psb=pause_btn):
+                def _make_ctrl(st=state, pb=play_btn, psb=pause_btn, gc=group_cols):
                     def _play():
                         st["active"] = True; st["paused"] = False
+                        if not any(c in self._live_plot_cols for c in gc):
+                            self._live_plot_cols.extend(gc)
+                            self._live_rebuild_col_buttons()
                         pb.configure(fg_color=COLORS["info"])
                         psb.configure(fg_color=COLORS["warn"])
                         if not self._live_running.is_set():
@@ -6151,10 +6125,12 @@ class LogAnalyzerApp(ctk.CTk):
                         elif self._live_paused.is_set():
                             # Fix: era in pausa globale → riprendi il thread
                             self._live_paused.clear()
+                        self._live_refresh_plot()
                     def _pause():
                         st["paused"] = not st["paused"]
                         psb.configure(fg_color=COLORS["accent"]
                                       if st["paused"] else COLORS["warn"])
+                        if not st["paused"]: self._live_refresh_plot()
                     def _stop():
                         st["active"] = False; st["paused"] = False
                         pb.configure(fg_color=COLORS["surface2"])
@@ -6296,57 +6272,42 @@ class LogAnalyzerApp(ctk.CTk):
         self._live_port_var.set(ports[0])
 
     def _live_open_csv(self):
-        path = filedialog.askopenfilename(
-            title="Seleziona CSV per simulazione",
-            filetypes=[("CSV", "*.csv"), ("Tutti", "*.*")])
-        if not path:
+        if self._live_running.is_set() or (self._live_thread and self._live_thread.is_alive()):
+            messagebox.showinfo("Riproduzione attiva", "Premi Stop prima di cambiare CSV.")
             return
-        self._live_csv_path = path
-        self._live_csv_lbl.configure(text=os.path.basename(path))
-        self._live_log_append(f"CSV simulazione: {path}")
-
-        # ── reset COMPLETO stato colonne (fix: CSV precedente non spariva) ──
-        self._live_headers      = []
-        self._live_col_meta     = {}
-        self._live_numeric_cols = []
-        self._live_plot_cols    = []
-        # distruggi tutti i widget figli rimasti nel frame scorrevole
-        for w in self._live_col_scroll.winfo_children():
-            try: w.destroy()
-            except Exception: pass
-        self._live_col_btns.clear()
-
+        path = filedialog.askopenfilename(title="Seleziona CSV per simulazione",
+                    filetypes=[("CSV", "*.csv"), ("Tutti", "*.*")])
+        if not path: return
+        self._live_load_id += 1
+        load_id = self._live_load_id
+        self._live_loading = True
         self._live_set_status("Caricamento CSV…", COLORS["text2"])
-
         def _load():
             try:
-                if _is_long_cycle_csv(path):
-                    _, headers, col_meta, numeric_cols, _, _, _, _ = \
-                        _parse_long_cycle_csv(path)
-                    long_fmt = True
-                else:
-                    _, headers, col_meta, numeric_cols, _, _, _, _ = \
-                        parse_universal_csv(path)
-                    long_fmt = False
+                long_fmt = _is_long_cycle_csv(path)
+                parsed = _parse_long_cycle_csv(path) if long_fmt else parse_universal_csv(path)
+                _, headers, meta, numeric, _dates, binary, _, _ = parsed
+                cols = list(dict.fromkeys(numeric + binary))
+                if not cols: raise ValueError("Nessuna colonna numerica nel CSV.")
                 def _apply():
-                    if long_fmt:
-                        self._live_log_append(
-                            "Formato rilevato: Long CSV (Cannon/Persico/Krauss Maffei)")
-                    self._live_headers      = headers
-                    self._live_col_meta     = col_meta
-                    self._live_numeric_cols = numeric_cols
-                    self._live_plot_cols    = list(numeric_cols[:8])
+                    if load_id != self._live_load_id: return
+                    self._live_loading = False
+                    self._live_csv_path = path
+                    self._live_csv_lbl.configure(text=os.path.basename(path))
+                    self._live_headers = headers
+                    self._live_col_meta = meta
+                    self._live_numeric_cols = cols
+                    self._live_plot_cols = list(cols[:8])
                     self._live_rebuild_col_buttons()
-                    self._live_log_append(
-                        f"Colonne numeriche: {len(numeric_cols)} — "
-                        f"{', '.join(numeric_cols[:12])}")
-                    self._live_set_status("CSV pronto.", COLORS["info"])
+                    if self._live_multi_mode: self._live_build_multi()
+                    self._live_set_status("CSV pronto. Play avvia una nuova acquisizione.", COLORS["info"])
                 self.after(0, _apply)
             except Exception as e:
-                self.after(0, self._live_log_append, f"Errore lettura CSV: {e}")
-                self.after(0, self._live_set_status,
-                           "Errore caricamento CSV.", COLORS["warn"])
-
+                def _error(message=str(e)):
+                    if load_id != self._live_load_id: return
+                    self._live_loading = False
+                    self._live_set_status(f"CSV non caricato: {message}", COLORS["error"])
+                self.after(0, _error)
         threading.Thread(target=_load, daemon=True).start()
 
     def _live_rebuild_col_buttons(self):
@@ -6385,6 +6346,7 @@ class LogAnalyzerApp(ctk.CTk):
                             self._live_plot_cols.remove(c)
                         else:
                             v.set(True)  # mantieni almeno una
+                    self._live_refresh_plot()
                 return _cmd
 
             cb = ctk.CTkCheckBox(
@@ -6401,11 +6363,13 @@ class LogAnalyzerApp(ctk.CTk):
     def _live_sel_all(self):
         self._live_plot_cols = list(self._live_numeric_cols)
         self._live_rebuild_col_buttons()
+        self._live_refresh_plot()
 
     def _live_sel_none(self):
         if self._live_numeric_cols:
             self._live_plot_cols = [self._live_numeric_cols[0]]
         self._live_rebuild_col_buttons()
+        self._live_refresh_plot()
 
     def _live_toggle_col(self, col):
         if col in self._live_plot_cols:
@@ -6414,334 +6378,176 @@ class LogAnalyzerApp(ctk.CTk):
         else:
             self._live_plot_cols.append(col)
         self._live_rebuild_col_buttons()
+        self._live_refresh_plot()
 
     # ── start / stop ─────────────────────────────────────────────────────
     def _live_start(self):
         if self._live_running.is_set():
             return
-        src = self._live_src_var.get()
-
-        # ── blocca se simulazione CSV senza file caricato ──
-        if src == "Simulazione CSV" and not self._live_csv_path:
-            messagebox.showwarning(
-                "Nessun file",
-                "Carica prima un CSV tramite il pulsante «CSV simulazione».")
+        if self._live_loading:
+            self._live_log_append("Attendi il completamento del caricamento CSV.")
             return
-
-        # ── reset completo ad ogni avvio ─────────────────────────────────
+        if self._live_thread is not None and self._live_thread.is_alive():
+            self._live_log_append("Arresto in corso: riprova tra un momento.")
+            return
+        src = self._live_src_var.get()
+        if src == "Simulazione CSV" and not self._live_csv_path:
+            messagebox.showwarning("Nessun file", "Carica prima un CSV.")
+            return
+        while not self._live_queue.empty() and not self._live_worker_error:
+            self._live_poll()
+        # Prima di sostituire una sessione offri la possibilità di esportarla.
+        if not self._live_allow_replace():
+            return
+        import tempfile
+        try:
+            archive = tempfile.TemporaryFile(mode="w+t", encoding="utf-8", newline="")
+        except OSError as e:
+            messagebox.showerror("Registrazione", str(e))
+            return
+        if self._live_archive is not None:
+            self._live_archive.close()
+        self._live_archive = archive
+        self._live_archive_keys = {}
+        self._live_total = 0
         self._live_rows.clear()
-        self._live_ipc.clear()
-        self._live_ipc._needs_full_redraw = True
-        # Fix: resetta zoom degli IPC multi al riavvio
-        if self._live_multi_mode:
-            for ipc, _, __ in self._live_multi_ipcs.values():
-                ipc.reset_zoom()
-        self._live_last_cols_set = set()
-        self._live_dropped = 0  # Fix 4: reset contatore campioni scartati
-        self._live_log_box.configure(state="normal")
-        self._live_log_box.delete("1.0", "end")
-        self._live_log_box.configure(state="disabled")
-        self._live_cnt_lbl.configure(text="Campioni: 0  |  In coda: 0")
-        self._live_alarm_active.clear()
-        self._live_alarm_count = 0
-        self._live_alarm_badge.configure(text="")
-        # svuota coda residua dal run precedente
+        self._live_cancel_poll()
         while not self._live_queue.empty():
             try: self._live_queue.get_nowait()
             except _queue.Empty: break
-
-        # Fix 1 — thread zombie: aspetta terminazione, poi verifica
-        if self._live_thread is not None and self._live_thread.is_alive():
-            self._live_running.clear()
-            self._live_ipc._live_user_zoomed = False  # reset zoom dopo pausa
-            self._live_thread.join(timeout=2.0)
-            if self._live_thread.is_alive():
-                # thread non terminato: rinuncia all'avvio per sicurezza
-                messagebox.showwarning("Attenzione",
-                    "Thread precedente non terminato. Riprova tra un momento.")
-                self._live_running.clear()
-                return
-
-        # svuota coda residua in modo sicuro (Fix race condition)
-        try:
-            while True:
-                self._live_queue.get_nowait()
-        except _queue.Empty:
-            pass
-                
-        # 🔄 RESET automatico zoom al PLAY
-        self._live_ipc.reset_zoom()
-        self._live_ipc._live_user_zoomed = False  # Fix zoom: reset flag al PLAY
-        self._live_ipc.clear_cursors()
+        self._live_ipc.clear()
         self._live_ipc._needs_full_redraw = True
-        self._live_running.set()
-        self._live_paused.clear()
+        self._live_ipc._live_user_zoomed = False
+        for ipc, _, _st in self._live_multi_ipcs.values():
+            ipc.clear(); ipc._needs_full_redraw = True
+            ipc._live_user_zoomed = False
+        self._live_dropped = 0
+        self._live_last_cols_set = set()
+        self._live_alarm_active.clear(); self._live_alarm_count = 0
+        self._live_alarm_badge.configure(text="")
+        self._live_worker_error = None
+        self._live_failed_row = None
+        self._live_stop_event.clear(); self._live_done_event.clear()
+        self._live_paused.clear(); self._live_running.set()
+        self._live_source_snapshot = src
+        self._live_path_snapshot = self._live_csv_path
+        self._live_headers_snapshot = list(self._live_headers)
+        self._live_speed_snapshot = self._live_speed_var.get()
         self._live_start_btn.configure(state="disabled")
         self._live_stop_btn.configure(state="normal")
-        self._live_pause_btn.configure(state="normal", text="⏸",
-                                       fg_color=COLORS["warn"])
-
-        # Fix 4 — leggi StringVar nel thread UI prima di avviare il thread background
-        self._live_speed_snapshot = self._live_speed_var.get()
-
+        self._live_pause_btn.configure(state="normal", text="⏸")
         if src == "Simulazione CSV":
-            self._live_sim_random = False
-            self._live_thread = threading.Thread(
-                target=self._live_sim_thread, daemon=True)
+            target, args = self._live_sim_thread, ()
         else:
-            port = self._live_port_var.get()
-            try:
-                baud = int(self._live_baud_var.get())
-            except Exception:
-                baud = 9600
-            self._live_thread = threading.Thread(
-                target=self._live_serial_thread,
-                args=(port, baud), daemon=True)
-
+            try: baud = int(self._live_baud_var.get())
+            except ValueError: baud = 9600
+            target, args = self._live_serial_thread, (self._live_port_var.get(), baud)
+        self._live_thread = threading.Thread(target=self._live_worker_run,
+                                             args=(target, args), daemon=True)
         self._live_thread.start()
         self._live_set_status("● Acquisizione in corso", COLORS["info"])
         self._live_poll()
 
     def _live_stop(self):
-        self._live_running.clear()
+        self._live_stop_event.set()
         self._live_paused.clear()
+        self._live_running.clear()
         self._live_stop_interp_timer()
         self._live_start_btn.configure(state="normal")
         self._live_stop_btn.configure(state="disabled")
-        self._live_pause_btn.configure(state="disabled", text="⏸",
-                                       fg_color=COLORS["warn"])
+        self._live_pause_btn.configure(state="disabled", text="⏸")
         self._live_set_status("● Fermato", COLORS["warn"])
+        # Il poll svuota anche gli ultimi campioni già ricevuti.
+        if self._live_poll_job is None:
+            self._live_poll()
 
     def _live_toggle_pause(self):
-        if not self._live_running.is_set():
-            return
+        if not self._live_running.is_set(): return
         if self._live_paused.is_set():
             self._live_paused.clear()
-            self._live_ipc._live_user_zoomed = False  # Fix zoom: reset flag alla ripresa
-            self._live_ipc.reset_zoom()               # Fix zoom: ritorna alla vista completa
+            self._live_pause_btn.configure(text="⏸", fg_color=COLORS["warn"])
+            self._live_set_status("● Acquisizione in corso", COLORS["info"])
+            self._live_refresh_plot()
         else:
             self._live_paused.set()
-        if self._live_paused.is_set():
-            self._live_pause_btn.configure(text="▶",
-                                           fg_color=COLORS["info"],
-                                           hover_color="#3a9a10")
-            self._live_set_status("⏸ In pausa", COLORS["warn"])
-        else:
-            self._live_pause_btn.configure(text="⏸",
-                                           fg_color=COLORS["warn"],
-                                           hover_color="#c87d00")
-            self._live_set_status("● Acquisizione in corso", COLORS["info"])
+            self._live_pause_btn.configure(text="▶", fg_color=COLORS["info"])
+            msg = ("⏸ Vista ferma; registrazione seriale attiva"
+                   if self._live_source_snapshot == "Seriale" else "⏸ Riproduzione in pausa")
+            self._live_set_status(msg, COLORS["warn"])
 
     def _live_clear(self):
-        _was_running = self._live_running.is_set()
-        if _was_running:
-            self._live_running.clear()
-        self._live_stop_interp_timer()
+        if self._live_thread is not None and self._live_thread.is_alive():
+            self._live_stop()
+            self._live_log_append("Arresto richiesto. Premi Cancella quando la lettura è terminata.")
+            return
+        self._live_poll()
+        if not self._live_allow_replace(): return
+        self._live_cancel_poll()
         self._live_rows.clear()
-        self._live_dropped = 0  # B2x: reset contatore scartati ad ogni clear
-        try:
-            while True: self._live_queue.get_nowait()
-        except Exception: pass
-        if self._live_multi_mode:
-            for ipc, _, __ in self._live_multi_ipcs.values():
-                ipc.clear(); ipc._needs_full_redraw = True
-        else:
-            self._live_ipc.clear()
-        self._live_log_box.configure(state="normal")
-        self._live_log_box.delete("1.0", "end")
-        self._live_log_box.configure(state="disabled")
-        self._live_cnt_lbl.configure(text="Campioni: 0  |  In coda: 0")
-        self._live_alarm_active.clear()
-        self._live_alarm_count = 0
+        self._live_total = 0; self._live_archive_keys = {}
+        self._live_failed_row = None
+        while not self._live_queue.empty():
+            try: self._live_queue.get_nowait()
+            except _queue.Empty: break
+        if self._live_archive is not None:
+            self._live_archive.close(); self._live_archive = None
+        self._live_ipc.clear()
+        for ipc, _, _st in self._live_multi_ipcs.values(): ipc.clear()
+        self._live_alarm_active.clear(); self._live_alarm_count = 0
         self._live_alarm_badge.configure(text="")
-        self._live_rebuild_alarm_cards()
-        if _was_running:
-            self.after(400, self._live_start)
+        self._live_cnt_lbl.configure(text="Campioni registrati: 0")
 
     # ── thread simulazione CSV ──────────────────────────────────────────
     def _live_sim_thread(self):
-        import time
-
-        def _wait_if_paused():
-            """Blocca il thread finché la simulazione è in pausa."""
-            while self._live_paused.is_set() and self._live_running.is_set():
-                time.sleep(0.1)
-
-        def _speed_factor():
-            # Fix 4: legge solo lo snapshot — mai StringVar dal thread background
-            sv = getattr(self, "_live_speed_snapshot", "1x")
-            if sv == "MAX":
-                return None
-            try:
-                return float(sv.rstrip("x"))
-            except Exception:
-                return 1.0
-
-        if getattr(self, "_live_sim_random", True) or not self._live_csv_path:
-            # simulazione puramente random
-            t = 0.0
-            while self._live_running.is_set():
-                _wait_if_paused()
-                if not self._live_running.is_set():
-                    break
-                row = {"_sim_t": t,
-                       "Temperatura": round(120 + random.gauss(0, 2), 2),
-                       "Pressione":   round(5.0  + random.gauss(0, 0.3), 3),
-                       "Forza":       round(3000 + random.gauss(0, 150), 1)}
-                try:
-                    self._live_queue.put_nowait(row)
-                except _queue.Full:
-                    self._live_dropped = getattr(self, "_live_dropped", 0) + 1
-                t += 0.5
-                sf = _speed_factor()
-                time.sleep(0.5 / sf if sf else 0)
-            return
-
-        # ── riproduzione CSV ────────────────────────────────────────────
-        try:
-            if _is_long_cycle_csv(self._live_csv_path):
-                rows, headers, col_meta, numeric_cols, datetime_cols, _, _, _ = \
-                    _parse_long_cycle_csv(self._live_csv_path)
-                _has_embedded_ts = True
-                self.after(0, self._live_log_append, "Formato: Long CSV (Cannon/Persico/Krauss Maffei)")
-            else:
-                rows, headers, col_meta, numeric_cols, datetime_cols, _, _, _ = \
-                    parse_universal_csv(self._live_csv_path)
-                _has_embedded_ts = False
-        except Exception as e:
-            self._live_queue.put({"_error": str(e)})
-            return
-
-        if not numeric_cols:
-            self._live_queue.put({"_error": "Nessuna colonna numerica nel CSV."})
-            return
-
-        # ── rileva la colonna tempo ─────────────────────────────────────
-        _TIME_NAMES = {"time","tempo","t","sec","seconds","s","zeit","temps",
-                       "elapsed","elapsed_s","ts","ticks","sample"}
-        x_col_dt  = datetime_cols[0] if datetime_cols else None
-        x_col_num = None
-        if not _has_embedded_ts:
-            for h in headers:
-                if h.lower().rstrip("_") in _TIME_NAMES:
-                    sample = [rows[i].get(h, "") for i in range(min(5, len(rows)))]
-                    sample_s = [str(v) for v in sample if v is not None and str(v).strip()]
-                    if all(_uc_try_float(v) for v in sample_s):
-                        x_col_num = h
-                        break
-
-        use_datetime = _has_embedded_ts or (x_col_dt is not None)
-        use_num_time = (not use_datetime) and (x_col_num is not None)
-
-        if not _has_embedded_ts:
-            self.after(0, self._live_log_append,
-                f"Tempo: {'datetime «' + x_col_dt + '»' if use_datetime else '«' + x_col_num + '» (sec)' if use_num_time else 'indice fisso'}"
-            )
-
-        prev_dt  = None
-        prev_num = None
-
+        path = self._live_path_snapshot
+        embedded = _is_long_cycle_csv(path)
+        parsed = _parse_long_cycle_csv(path) if embedded else parse_universal_csv(path)
+        rows, headers, meta, numeric, dates, binary, _sep, _enc = parsed
+        cols = list(dict.fromkeys(numeric + binary))
+        if not cols: raise ValueError("Nessuna colonna numerica nel CSV.")
+        time_names = {"time", "tempo", "t", "sec", "seconds", "s", "zeit",
+                      "temps", "elapsed", "elapsed_s", "ts", "ticks", "sample"}
+        dt_col = dates[0] if dates else None
+        num_col = next((h for h in headers if h.lower().rstrip("_") in time_names
+                        and h in cols), None)
+        previous = None
         for i, r in enumerate(rows):
-            if not self._live_running.is_set():
-                break
-            _wait_if_paused()
-            if not self._live_running.is_set():
-                break
-
-            row_out = {}
-            for col in numeric_cols:
-                v = r.get(col)
-                if isinstance(v, float):
-                    row_out[col] = v
-                else:
-                    try:
-                        row_out[col] = float(str(v).replace(",", "."))
-                    except Exception:
-                        row_out[col] = None
-
-            sf = _speed_factor()
-
-            if _has_embedded_ts:
-                ts = r.get("_ts")
-                if ts:
-                    row_out["_ts"] = ts
-                    if prev_dt is not None and sf is not None:
-                        delta = (ts - prev_dt).total_seconds()
-                        if delta > 0:
-                            time.sleep(max(0.01, delta / sf))
-                    prev_dt = ts
-                else:
-                    if sf is not None:
-                        time.sleep(0.1 / sf)
-
-            elif use_datetime:
-                ts = _uc_parse_dt(r.get(x_col_dt, ""))
-                if ts:
-                    row_out["_ts"] = ts
-                    if prev_dt is not None and sf is not None:
-                        delta = (ts - prev_dt).total_seconds()
-                        time.sleep(max(0.01, delta / sf))
-                    prev_dt = ts
-                else:
-                    if sf is not None:
-                        time.sleep(0.1 / sf)
-
-            elif use_num_time:
+            row = {}
+            for col in cols:
                 try:
-                    t_now = float(str(r.get(x_col_num, "")).replace(",", "."))
-                    row_out["_sim_t"] = t_now
-                    if prev_num is not None and sf is not None:
-                        delta = t_now - prev_num
-                        if delta > 0:
-                            time.sleep(max(0.01, delta / sf))
-                    prev_num = t_now
-                except Exception:
-                    if sf is not None:
-                        time.sleep(0.1 / sf)
-
+                    v = float(str(r.get(col)).replace(",", "."))
+                    row[col] = v if math.isfinite(v) else None
+                except (ValueError, TypeError): row[col] = None
+            ts = r.get("_ts") if embedded else (_uc_parse_dt(r.get(dt_col, "")) if dt_col else None)
+            if ts is not None:
+                row["_ts"] = ts; current = ts.timestamp()
+            elif num_col and row.get(num_col) is not None:
+                current = row[num_col]; row["_sim_t"] = current
             else:
-                row_out["_sim_i"] = i
-                if sf is not None:
-                    time.sleep(max(0.01, 1.0 / sf))
-
-            try:
-                self._live_queue.put_nowait(row_out)
-            except _queue.Full:
-                self._live_dropped = getattr(self, "_live_dropped", 0) + 1
+                current = float(i); row["_sim_i"] = i
+            delta = max(0.0, current - previous) if previous is not None else 0.0
+            previous = current
+            if not self._live_wait(delta): return
+            if not self._live_enqueue(row, lossless=True): return
 
     # ── thread seriale reale ────────────────────────────────────────────
     def _live_serial_thread(self, port, baud):
-        if not SERIAL_AVAILABLE:
-            self._live_queue.put({"_error": "pyserial non installato."})
-            return
-        import time
-        try:
-            ser = serial.Serial(port, baud, timeout=1)
-            self.after(0, self._live_log_append, f"Seriale aperta: {port} @ {baud}")
-        except Exception as e:
-            self._live_queue.put({"_error": f"Errore apertura {port}: {e}"})
-            return
+        if not SERIAL_AVAILABLE: raise ValueError("pyserial non installato.")
+        ser = serial.Serial(port, baud, timeout=0.1)
         buf = ""
-        while self._live_running.is_set():
-            try:
-                chunk = ser.read(256).decode("utf-8", errors="replace")
-                buf += chunk
+        try:
+            while not self._live_stop_event.is_set():
+                buf += ser.read(256).decode("utf-8", errors="replace")
+                if len(buf) > 1024 * 1024:
+                    raise ValueError("Riga seriale troppo lunga o terminatore mancante.")
                 while "\n" in buf:
                     line, buf = buf.split("\n", 1)
                     row = self._live_parse_line(line.strip())
-                    if row:
-                        try:
-                            self._live_queue.put_nowait(row)  # C4: non blocca il thread
-                        except _queue.Full:
-                            self._live_dropped = getattr(self, "_live_dropped", 0) + 1
-            except Exception as e:
-                self.after(0, self._live_set_status,
-                           f"Errore seriale: {e}", COLORS["warn"])
-                time.sleep(0.05)
-        try:
+                    if row and "_raw" not in row:
+                        row.setdefault("_ts", datetime.now().astimezone())
+                        if not self._live_enqueue(row, lossless=False): return
+        finally:
             ser.close()
-        except Exception:
-            pass
 
     def _live_parse_line(self, line):
         """Parsa una riga CSV o key=val da seriale."""
@@ -6763,9 +6569,9 @@ class LogAnalyzerApp(ctk.CTk):
         parts = line.split(",")
         if len(parts) < 2:
             parts = line.split(";")
-        if self._live_headers and len(parts) == len(self._live_headers):
+        if self._live_headers_snapshot and len(parts) == len(self._live_headers_snapshot):
             row = {}
-            for h, v in zip(self._live_headers, parts):
+            for h, v in zip(self._live_headers_snapshot, parts):
                 try:
                     row[h] = float(v.strip().replace(",", "."))
                 except Exception:
@@ -6775,172 +6581,98 @@ class LogAnalyzerApp(ctk.CTk):
 
     # ── polling UI ───────────────────────────────────────────────────────
     def _live_poll(self):
-        if not self._live_running.is_set():
+        self._live_cancel_poll()
+        paused_csv = (self._live_paused.is_set()
+                      and getattr(self, "_live_source_snapshot", "") == "Simulazione CSV")
+        count = 0
+        if getattr(self, "_live_failed_row", None) is not None:
             return
-        drained = 0
-        last_row = None
-        while drained < 100:  # max 100 campioni per tick per non bloccare la UI
+        while not paused_csv and count < 100:
+            try: row = self._live_queue.get_nowait()
+            except _queue.Empty: break
             try:
-                row = self._live_queue.get_nowait()
-            except _queue.Empty:
+                self._live_archive.seek(0, 2)
+                self._live_archive.write(json.dumps(row, default=lambda v: v.isoformat()) + "\n")
+            except (OSError, TypeError, ValueError) as e:
+                self._live_worker_error = f"Registrazione interrotta: {e}"
+                self._live_stop_event.set(); self._live_running.clear()
+                # Non continuare a consumare dati senza archiviarli.
+                self._live_failed_row = row
+                self._live_start_btn.configure(state="normal")
+                self._live_stop_btn.configure(state="disabled")
+                self._live_pause_btn.configure(state="disabled")
                 break
-            drained += 1
-            if "_error" in row:
-                self._live_log_append(f"ERRORE: {row['_error']}")
-                self._live_stop()
-                return
+            self._live_total += 1
+            self._live_archive_keys.update(dict.fromkeys(row))
             self._live_rows.append(row)
-            # C2: finestra scorrevole — memoria bounded, non cresce infinitamente
-            if len(self._live_rows) > MAX_LIVE_POINTS:
-                del self._live_rows[:-MAX_LIVE_POINTS]
-            # aggiorna col_meta e plot_cols automaticamente
+            del self._live_rows[:-MAX_LIVE_POINTS]
+            self._live_check_alarms()
             for k, v in row.items():
-                if k.startswith("_"):
-                    continue
-                if isinstance(v, (int, float)) and k not in self._live_col_meta:
-                    unit, label, col_type = _uc_col_meta(k, ["1.0"])
-                    self._live_col_meta[k] = {"unit": unit, "label": label,
-                                               "col_type": "numeric"}
-                    if k not in self._live_numeric_cols:
-                        self._live_numeric_cols.append(k)
-                    if len(self._live_plot_cols) < 8 and k not in self._live_plot_cols:
-                        self._live_plot_cols.append(k)
-            last_row = row
-        # una sola riga di log per tick: valori dell'ultimo campione + conteggio
-        if drained > 0 and last_row is not None:
-            vals = "  ".join(
-                f"{k}={v:.3g}" if isinstance(v, float) else f"{k}={v}"
-                for k, v in last_row.items() if not k.startswith("_"))
-            self._live_log_append(
-                f"+{drained}  {vals}", scroll=False)
-
-        if drained > 0:
-            self._live_last_poll_draw = getattr(self, "_live_last_poll_draw", 0)
-            import time as _t; self._live_last_poll_draw = _t.monotonic()
-            dropped = getattr(self, "_live_dropped", 0)
-            drop_txt = f"  |  Scartati: {dropped}" if dropped > 0 else ""
-            self._live_cnt_lbl.configure(
-                text=f"Campioni: {len(self._live_rows)}  |  In coda: {self._live_queue.qsize()}{drop_txt}")
+                if not k.startswith("_") and isinstance(v, (int, float)) and k not in self._live_numeric_cols:
+                    unit, label, typ = _uc_col_meta(k, [str(v)])
+                    self._live_col_meta[k] = {"unit": unit, "label": label, "col_type": "numeric"}
+                    self._live_numeric_cols.append(k)
+                    if len(self._live_plot_cols) < 8: self._live_plot_cols.append(k)
+            count += 1
+        if count:
+            self._live_cnt_lbl.configure(text=f"Registrati: {self._live_total} | Vista: {len(self._live_rows)} | "
+                                             f"In coda: {self._live_queue.qsize()} | Scartati: {self._live_dropped}")
             if set(self._live_numeric_cols) != getattr(self, "_live_last_cols_set", set()):
                 self._live_last_cols_set = set(self._live_numeric_cols)
                 self._live_rebuild_col_buttons()
-            self._live_check_alarms()
-            # Fix 2: se interp attiva, il tick a 200ms è già autoritative per il render
-            # il poll aggiorna solo i dati, non ridisegna (elimina doppio redraw 2+5 Hz)
-            interp_on = (getattr(self, "_live_interp_var", None) and
-                         self._live_interp_var.get() and
-                         self._live_interp_job is not None)
-            if not interp_on:
-                self._live_refresh_plot()
-
-        try:
-            ms = max(100, int(self._live_rate_var.get()))
-        except Exception:
-            ms = 500
-        self.after(ms, self._live_poll)
+            if not self._live_paused.is_set(): self._live_refresh_plot()
+        done = self._live_done_event.is_set()
+        if done and self._live_queue.empty():
+            was_stopped = self._live_stop_event.is_set()
+            self._live_running.clear(); self._live_paused.clear()
+            self._live_start_btn.configure(state="normal")
+            self._live_stop_btn.configure(state="disabled")
+            self._live_pause_btn.configure(state="disabled", text="⏸")
+            if self._live_worker_error:
+                self._live_set_status(self._live_worker_error, COLORS["error"])
+            else:
+                self._live_set_status("● Fermato" if was_stopped else "✓ Riproduzione completata", COLORS["info"])
+            return
+        if self._live_worker_error and self._live_stop_event.is_set():
+            self._live_set_status(self._live_worker_error, COLORS["error"])
+            return
+        if self._live_running.is_set() or (self._live_thread is not None and self._live_thread.is_alive()) or not self._live_queue.empty():
+            try: ms = max(20, min(2000, int(self._live_rate_var.get())))
+            except ValueError: ms = 500
+            self._live_poll_job = self.after(ms, self._live_poll)
 
     def _live_refresh_plot(self):
-        if not self._live_rows or not self._live_plot_cols:
-            return
-        try:
-            max_pts = int(self._live_maxpts_var.get())
-            if max_pts < 10:
-                max_pts = 10
-        except Exception:
-            max_pts = MAX_LIVE_POINTS
+        if not self._live_rows or not self._live_plot_cols: return
+        try: max_pts = max(10, min(MAX_LIVE_POINTS, int(self._live_maxpts_var.get())))
+        except ValueError: max_pts = MAX_LIVE_POINTS
         rows = self._live_rows[-max_pts:]
-
-        x_col = None
-        for r in rows[:1]:
-            if "_ts" in r:
-                x_col = "_ts"
-            elif "_sim_t" in r:
-                x_col = "_sim_t"
-        xs_raw = []
-        for i, r in enumerate(rows):
-            if x_col == "_ts":
-                xs_raw.append(r.get("_ts"))
-            elif x_col == "_sim_t":
-                xs_raw.append(r.get("_sim_t", i))
-            else:
-                xs_raw.append(i)
-
+        x_col = next((k for k in ("_ts", "_sim_t", "_sim_i") if k in rows[0]), None)
+        xs = [r.get(x_col) if x_col else i for i, r in enumerate(rows)]
         x_type = "datetime" if x_col == "_ts" else "index"
-        series = {}
-        for col in self._live_plot_cols:
-            vals = []
-            for r in rows:
-                v = r.get(col)
-                vals.append(float(v) if isinstance(v, (int, float)) else None)
-            series[col] = vals
-
-        # ── mappa colori fissa basata su _live_numeric_cols (combacia con sidebar) ──
-        palette = list(_UC_SERIES_PALETTE)
-        colors = {col: palette[i % len(palette)]
-                  for i, col in enumerate(self._live_numeric_cols)}
-
-        # ── modalità multi-grafico ─────────────────────────────────────
-        if self._live_multi_mode and self._live_multi_ipcs:
-            # Fix 3: distribuisci i draw nel tempo (20ms offset ciascuno)
-            # invece di eseguirli in sequenza bloccante
-            active_entries = [
-                (ipc, gc, st)
-                for _, (ipc, gc, st) in self._live_multi_ipcs.items()
-                if st.get("active") and not st.get("paused")]
-
-            def _draw_one(entries, idx, xs=xs_raw, xt=x_type,
-                          cm=self._live_col_meta, cl=colors, rw=rows):
-                if idx >= len(entries):
-                    return
-                ipc, gc, st = entries[idx]
-                g_series = {col: [float(r.get(col)) if isinstance(r.get(col),
-                            (int, float)) else None for r in rw] for col in gc}
-                if g_series:
-                    ipc._ranges = [r for r in getattr(self, "_live_alarm_rules", [])
-                                   if r.get("col") in gc]
-                    ipc.update_live(xs, g_series, xt, cm, colors=cl)
-                if idx + 1 < len(entries):
-                    self.after(20, lambda i=idx+1: _draw_one(entries, i))
-
-            if active_entries:
-                _draw_one(active_entries, 0)
-            return
-
-        # ── B: redraw incrementale — no clf, no flash ──────────────────
-        # aggiorna bande range solo se le regole sono cambiate
-        current_rules = getattr(self, "_live_alarm_rules", [])
-        if current_rules != getattr(self, "_live_last_rules_snapshot", None):
-            self._live_last_rules_snapshot = list(current_rules)
-            self._live_ipc._ranges = current_rules
-            self._live_ipc._needs_full_redraw = True
-        self._live_ipc.update_live(xs_raw, series, x_type,self._live_col_meta, colors=colors)
-        
-        # ⚡ AUTO-SCROLL live: finestra scorre automaticamente
-        if (hasattr(self.master, '_live_running') and self.master._live_running.is_set()
-                and not getattr(self._live_ipc, '_live_user_zoomed', False)):
-            xs_num = [self._to_num(x) for x in xs_raw if self._to_num(x) is not None]
-            if xs_num:
-                last_x = max(xs_num)
-                xlim = self._live_ipc._ax1.get_xlim()
-                width = xlim[1] - xlim[0]
-                new_left = max(last_x - width * 0.9, min(xs_num))
-                self._live_ipc._ax1.set_xlim(new_left, new_left + width)
-                if hasattr(self._live_ipc, '_ax2') and self._live_ipc._ax2: 
-                    self._live_ipc._ax2.set_xlim(new_left, new_left + width)
-        
-
-        # ── A: avvia/ferma il timer interpolazione in base alla checkbox ─
-        if getattr(self, "_live_interp_var", None) and self._live_interp_var.get():
-            self._live_start_interp_timer()
+        colors = {c: _UC_SERIES_PALETTE[i % len(_UC_SERIES_PALETTE)]
+                  for i, c in enumerate(self._live_numeric_cols)}
+        if self._live_multi_mode:
+            targets = [(ipc, [c for c in cols if c in self._live_plot_cols])
+                       for ipc, cols, st in self._live_multi_ipcs.values()
+                       if (st.get("active") or not self._live_running.is_set()) and not st.get("paused")]
         else:
-            self._live_stop_interp_timer()
+            targets = [(self._live_ipc, self._live_plot_cols)]
+        for ipc, cols in targets:
+            if not cols:
+                ipc.clear(); ipc._needs_full_redraw = True
+                continue
+            series = {c: [float(r[c]) if isinstance(r.get(c), (int, float)) else None
+                          for r in rows] for c in cols}
+            rules = [r for r in self._live_alarm_rules if r.get("col") in cols]
+            if rules != ipc._ranges:
+                ipc._ranges = list(rules); ipc._needs_full_redraw = True
+            ipc.update_live(xs, series, x_type, self._live_col_meta, colors=colors,
+                            connect_lines=self._live_interp_var.get())
 
     # ── interpolazione (A) ───────────────────────────────────────────────
     def _live_start_interp_timer(self):
-        """Avvia il ticker da 200ms per aggiornare il grafico con punti interpolati."""
-        if self._live_interp_job is not None:
-            return  # già attivo
-        self._live_interp_tick()
+        # Compatibilità con i vecchi controlli: solo campioni reali.
+        self._live_refresh_plot()
 
     def _live_stop_interp_timer(self):
         if self._live_interp_job is not None:
@@ -6949,91 +6681,8 @@ class LogAnalyzerApp(ctk.CTk):
             self._live_interp_job = None
 
     def _live_interp_tick(self):
-        """Ogni 200ms aggiunge un punto interpolato. Fix 2: salta se il poll
-        ha già ridisegnato negli ultimi 150ms (evita doppio redraw)."""
-        if not self._live_running.is_set():
-            self._live_interp_job = None
-            return
-        if not self._live_rows or len(self._live_rows) < 2:
-            self._live_interp_job = self.after(200, self._live_interp_tick)
-            return
-
-        # Fix 2: se il poll ha ridisegnato di recente, non ridisegnare di nuovo
-        import time as _t
-        last_poll = getattr(self, "_live_last_poll_draw", 0)
-        if (_t.monotonic() - last_poll) < 0.15:
-            self._live_interp_job = self.after(200, self._live_interp_tick)
-            return
-
-        last   = self._live_rows[-1]
-        prev   = self._live_rows[-2]
-
-        # calcola il delta temporale reale tra gli ultimi due campioni
-        def _xval(r):
-            if "_ts" in r:   return r["_ts"].timestamp()
-            if "_sim_t" in r: return r["_sim_t"]
-            return None
-
-        x0 = _xval(prev)
-        x1 = _xval(last)
-        if x0 is None or x1 is None or x1 <= x0:
-            self._live_interp_job = self.after(200, self._live_interp_tick)
-            return
-
-        # quanto tempo è passato dal secondo punto
-        import time as _time
-        now = _time.monotonic()
-        # stimiamo la posizione "ora" nel tempo del CSV
-        try:
-            sf_str = getattr(self, "_live_speed_snapshot", "1x")
-            sf = 1.0 if sf_str == "MAX" else float(sf_str.rstrip("x"))
-        except Exception:
-            sf = 1.0
-
-        elapsed_real = 0.2 * sf   # 200ms reali × velocità
-        alpha = min(1.0, elapsed_real / (x1 - x0))  # 0..1
-
-        # costruisce una riga interpolata lineare
-        interp_row = {}
-        for col in self._live_plot_cols:
-            v0 = prev.get(col)
-            v1 = last.get(col)
-            if isinstance(v0, (int, float)) and isinstance(v1, (int, float)):
-                interp_row[col] = v0 + (v1 - v0) * alpha
-            else:
-                interp_row[col] = v1
-
-        # x interpolata
-        if "_sim_t" in last:
-            interp_row["_sim_t"] = x0 + (x1 - x0) * alpha
-        elif "_ts" in last:
-            from datetime import timedelta
-            interp_row["_ts"] = prev["_ts"] + timedelta(seconds=(x1 - x0) * alpha)
-
-        # costruisce serie da mostrare: rows reali + punto interpolato
-        try:
-            max_pts = int(self._live_maxpts_var.get())
-            if max_pts < 10: max_pts = 10
-        except Exception:
-            max_pts = MAX_LIVE_POINTS
-        rows_disp = self._live_rows[-(max_pts - 1):] + [interp_row]
-
-        x_col = "_ts" if "_ts" in last else ("_sim_t" if "_sim_t" in last else None)
-        xs_raw = []
-        for i, r in enumerate(rows_disp):
-            if x_col == "_ts":    xs_raw.append(r.get("_ts"))
-            elif x_col == "_sim_t": xs_raw.append(r.get("_sim_t", i))
-            else:                 xs_raw.append(i)
-
-        x_type = "datetime" if x_col == "_ts" else "index"
-        series = {}
-        for col in self._live_plot_cols:
-            vals = [float(r.get(col)) if isinstance(r.get(col), (int, float)) else None
-                    for r in rows_disp]
-            series[col] = vals
-
-        self._live_ipc.update_live(xs_raw, series, x_type, self._live_col_meta)
-        self._live_interp_job = self.after(200, self._live_interp_tick)
+        self._live_interp_job = None
+        if not self._live_paused.is_set(): self._live_refresh_plot()
 
     def _live_reset_cursors(self):
         """Azzera i cursori A/B e le linee delta dal grafico."""
@@ -7070,31 +6719,97 @@ class LogAnalyzerApp(ctk.CTk):
         self._live_log_box.configure(state="disabled")
 
     def _live_export_csv(self):
-        if not self._live_rows:
+        if not self._live_total or self._live_archive is None:
             messagebox.showinfo("Esporta", "Nessun dato da esportare.")
-            return
-        path = filedialog.asksaveasfilename(
-            defaultextension=".csv",
-            filetypes=[("CSV", "*.csv")],
-            title="Salva dati live come CSV")
-        if not path:
-            return
-        # raccoglie tutte le chiavi non private (O(n) con dict per preservare l'ordine)
-        seen = {}
-        for r in self._live_rows:
-            for k in r:
-                if not k.startswith("_"):
-                    seen.setdefault(k, None)
-        all_keys = list(seen.keys())
+            return False
+        path = filedialog.asksaveasfilename(defaultextension=".csv",
+                    filetypes=[("CSV", "*.csv")], title="Salva acquisizione completa con tempi")
+        if not path: return False
         try:
-            with open(path, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=all_keys, extrasaction="ignore")
+            self._live_archive.flush(); self._live_archive.seek(0)
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.DictWriter(f, fieldnames=list(self._live_archive_keys), extrasaction="ignore")
                 writer.writeheader()
-                for r in self._live_rows:
-                    writer.writerow({k: r.get(k, "") for k in all_keys})
-            messagebox.showinfo("Esporta", f"Salvato: {path}")
-        except Exception as e:
-            messagebox.showerror("Errore", str(e))
+                for line in self._live_archive: writer.writerow(json.loads(line))
+            messagebox.showinfo("Esporta", f"Salvati {self._live_total} campioni in:\n{path}")
+            return True
+        except (OSError, ValueError) as e:
+            messagebox.showerror("Esporta", str(e))
+            return False
+        finally:
+            self._live_archive.seek(0, 2)
+
+
+    def _live_follow_view(self):
+        for ipc in [self._live_ipc] + [entry[0] for entry in self._live_multi_ipcs.values()]:
+            ipc._live_user_zoomed = False
+            ipc._zoom_stack = []
+        self._live_refresh_plot()
+
+    def _live_worker_run(self, target, args):
+        try: target(*args)
+        except Exception as e: self._live_worker_error = str(e)
+        finally: self._live_done_event.set()
+
+    def _live_wait(self, seconds):
+        """Tempo CSV; pause/stop/velocità controllati ogni 20 ms."""
+        import time
+        remaining = max(0.0, seconds)
+        while not self._live_stop_event.is_set():
+            if self._live_paused.is_set():
+                self._live_stop_event.wait(0.02)
+                continue
+            if remaining <= 0: return True
+            value = self._live_speed_snapshot
+            if value == "MAX": return True
+            try: speed = max(0.01, float(value.rstrip("x")))
+            except (ValueError, TypeError): speed = 1.0
+            start = time.monotonic()
+            self._live_stop_event.wait(min(0.02, remaining / speed))
+            if not self._live_paused.is_set():
+                remaining -= (time.monotonic() - start) * speed
+        return False
+
+    def _live_enqueue(self, row, lossless):
+        while not self._live_stop_event.is_set():
+            if lossless and not self._live_wait(0): return False
+            try:
+                self._live_queue.put(row, timeout=0.02 if lossless else 0)
+                return True
+            except _queue.Full:
+                if not lossless:
+                    self._live_dropped += 1
+                    return True
+        return False
+
+    def _live_cancel_poll(self):
+        if self._live_poll_job is not None:
+            self.after_cancel(self._live_poll_job)
+            self._live_poll_job = None
+
+    def _live_allow_replace(self):
+        if not self._live_total: return True
+        answer = messagebox.askyesnocancel("Acquisizione presente",
+                 "Vuoi esportare i campioni prima di sostituirli o chiudere?\n"
+                 "Sì: esporta. No: scarta. Annulla: conserva la sessione.")
+        if answer is None: return False
+        return self._live_export_csv() if answer else True
+
+    def _live_close(self):
+        if self._live_thread is not None and self._live_thread.is_alive():
+            self._live_stop()
+            self.after(100, self._live_close)
+            return
+        # Archivia anche la coda residua prima di proporre l'esportazione.
+        if not self._live_queue.empty() and not getattr(self, "_live_failed_row", None):
+            self._live_poll()
+            if not self._live_queue.empty():
+                self.after(50, self._live_close)
+                return
+        if not self._live_allow_replace(): return
+        self._live_cancel_poll()
+        if self._live_archive is not None: self._live_archive.close()
+        self.destroy()
 
 if __name__=="__main__":
     app=LogAnalyzerApp();app.mainloop()
