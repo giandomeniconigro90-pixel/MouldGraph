@@ -1,17 +1,25 @@
 # Struttura del codice
 
-Fino al commit `a5d62b3` tutta l'app era in un unico file, `log_analyzer_desktop_live.py`
-(~7.200 righe). Ora il codice è diviso nel package `mouldgraph/`. Ogni funzione, classe
-e metodo è stato spostato **senza modifiche**. È stato verificato confrontando l'albero
-sintattico di ogni pezzo con quello del monolite.
+Tutta l'app è nel monolite `log_analyzer_desktop_live.py` (~7.200 righe), che **non si
+tocca mai**: resta identico a main (`a5d62b3`) e continua a funzionare da solo.
+
+Accanto al monolite c'è il package `mouldgraph/`, con lo stesso codice diviso in moduli.
+Ogni funzione, classe e metodo è stato copiato **senza modifiche**. È stato verificato
+confrontando l'albero sintattico di ogni pezzo con quello del monolite.
 
 ## Avvio
 
-```
-python log_analyzer_desktop_live.py
-```
+| Versione | Comando |
+|---|---|
+| Monolite (intatto) | `python log_analyzer_desktop_live.py` |
+| Modulare | `python avvia_mouldgraph.py` |
 
-Il file è rimasto solo come punto di ingresso, e lo usa anche `MouldGraph.spec` per PyInstaller.
+`MouldGraph.spec` costruisce ancora l'exe dal monolite. Per costruire l'exe della
+versione modulare:
+
+```
+pyinstaller --noconfirm --onefile --windowed --name MouldGraph --collect-all customtkinter --collect-all matplotlib avvia_mouldgraph.py
+```
 
 ## Mappa
 
