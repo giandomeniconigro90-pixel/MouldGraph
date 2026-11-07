@@ -3112,6 +3112,12 @@ class LogAnalyzerApp(ctk.CTk):
         self._live_queue        = _queue.Queue(maxsize=2000)  # limite memoria
         self._live_running      = threading.Event()  # set=in corso, clear=fermo
         self._live_paused       = threading.Event()  # set=in pausa, clear=attivo
+        self._live_stop_event = threading.Event()
+        self._live_done_event = threading.Event()
+        self._live_poll_job = None
+        self._live_worker_error = None
+        self._live_total = 0
+        self._live_loading = False
         self._live_thread       = None
         self._live_rows         = []     # {col: val, …} accumulati
         self._live_headers      = []
@@ -6316,11 +6322,15 @@ class LogAnalyzerApp(ctk.CTk):
         self._live_port_var.set(ports[0])
 
     def _live_open_csv(self):
+        if self._live_loading or self._live_running.is_set() or (self._live_thread is not None and self._live_thread.is_alive()):
+            messagebox.showinfo("Live Data", "Termina la lettura corrente prima di scegliere un altro CSV.")
+            return
         path = filedialog.askopenfilename(
             title="Seleziona CSV per simulazione",
             filetypes=[("CSV", "*.csv"), ("Tutti", "*.*")])
         if not path:
             return
+        self._live_loading = True
         self._live_csv_path = path
         self._live_csv_lbl.configure(text=os.path.basename(path))
         self._live_log_append(f"CSV simulazione: {path}")
@@ -6349,6 +6359,7 @@ class LogAnalyzerApp(ctk.CTk):
                         parse_universal_csv(path)
                     long_fmt = False
                 def _apply():
+                    self._live_loading = False
                     if long_fmt:
                         self._live_log_append(
                             "Formato rilevato: Long CSV (Cannon/Persico/Krauss Maffei)")
@@ -6363,6 +6374,7 @@ class LogAnalyzerApp(ctk.CTk):
                     self._live_set_status("CSV pronto.", COLORS["info"])
                 self.after(0, _apply)
             except Exception as e:
+                self.after(0, lambda: setattr(self, "_live_loading", False))
                 self.after(0, self._live_log_append, f"Errore lettura CSV: {e}")
                 self.after(0, self._live_set_status,
                            "Errore caricamento CSV.", COLORS["warn"])
@@ -6439,6 +6451,13 @@ class LogAnalyzerApp(ctk.CTk):
     def _live_start(self):
         if self._live_running.is_set():
             return
+        if self._live_loading:
+            messagebox.showinfo("Caricamento", "Attendi il completamento del caricamento CSV.")
+            return
+        if self._live_thread is not None and self._live_thread.is_alive():
+            messagebox.showinfo("Arresto in corso", "Attendi la fine della lettura prima di riavviare.")
+            return
+        self._live_cancel_poll()
         src = self._live_src_var.get()
 
         # ── blocca se simulazione CSV senza file caricato ──
@@ -6470,17 +6489,6 @@ class LogAnalyzerApp(ctk.CTk):
             try: self._live_queue.get_nowait()
             except _queue.Empty: break
 
-        # Fix 1 — thread zombie: aspetta terminazione, poi verifica
-        if self._live_thread is not None and self._live_thread.is_alive():
-            self._live_running.clear()
-            self._live_thread.join(timeout=2.0)
-            if self._live_thread.is_alive():
-                # thread non terminato: rinuncia all'avvio per sicurezza
-                messagebox.showwarning("Attenzione",
-                    "Thread precedente non terminato. Riprova tra un momento.")
-                self._live_running.clear()
-                return
-
         # svuota coda residua in modo sicuro (Fix race condition)
         try:
             while True:
@@ -6492,6 +6500,11 @@ class LogAnalyzerApp(ctk.CTk):
         self._live_ipc.reset_zoom()
         self._live_ipc.clear_cursors()
         self._live_ipc._needs_full_redraw = True
+        self._live_source_snapshot = src
+        self._live_stop_event.clear()
+        self._live_done_event.clear()
+        self._live_worker_error = None
+        self._live_total = 0
         self._live_running.set()
         self._live_paused.clear()
         self._live_start_btn.configure(state="disabled")
@@ -6505,7 +6518,7 @@ class LogAnalyzerApp(ctk.CTk):
         if src == "Simulazione CSV":
             self._live_sim_random = False
             self._live_thread = threading.Thread(
-                target=self._live_sim_thread, daemon=True)
+                target=self._live_worker_run, args=(self._live_sim_thread, ()), daemon=True)
         else:
             port = self._live_port_var.get()
             try:
@@ -6513,14 +6526,15 @@ class LogAnalyzerApp(ctk.CTk):
             except Exception:
                 baud = 9600
             self._live_thread = threading.Thread(
-                target=self._live_serial_thread,
-                args=(port, baud), daemon=True)
+                target=self._live_worker_run,
+                args=(self._live_serial_thread, (port, baud)), daemon=True)
 
         self._live_thread.start()
         self._live_set_status("● Acquisizione in corso", COLORS["info"])
         self._live_poll()
 
     def _live_stop(self):
+        self._live_stop_event.set()
         self._live_running.clear()
         self._live_paused.clear()
         self._live_stop_interp_timer()
@@ -6530,6 +6544,9 @@ class LogAnalyzerApp(ctk.CTk):
                                        fg_color=COLORS["warn"])
         self._live_set_status("● Fermato", COLORS["warn"])
 
+        if self._live_poll_job is None:
+            self._live_poll()
+
     def _live_toggle_pause(self):
         if not self._live_running.is_set():
             return
@@ -6537,6 +6554,7 @@ class LogAnalyzerApp(ctk.CTk):
             self._live_paused.clear()
         else:
             self._live_paused.set()
+            self._live_stop_interp_timer()
         if self._live_paused.is_set():
             self._live_pause_btn.configure(text="▶",
                                            fg_color=COLORS["info"],
@@ -6547,11 +6565,16 @@ class LogAnalyzerApp(ctk.CTk):
                                            fg_color=COLORS["warn"],
                                            hover_color="#c87d00")
             self._live_set_status("● Acquisizione in corso", COLORS["info"])
+            self._live_refresh_plot()
 
     def _live_clear(self):
-        _was_running = self._live_running.is_set()
-        if _was_running:
-            self._live_running.clear()
+        if self._live_thread is not None and self._live_thread.is_alive():
+            self._live_stop()
+            self.after(50, self._live_clear)
+            return
+        self._live_cancel_poll()
+        self._live_total = 0
+        self._live_running.clear()
         self._live_stop_interp_timer()
         self._live_rows.clear()
         self._live_dropped = 0  # B2x: reset contatore scartati ad ogni clear
@@ -6571,17 +6594,58 @@ class LogAnalyzerApp(ctk.CTk):
         self._live_alarm_count = 0
         self._live_alarm_badge.configure(text="")
         self._live_rebuild_alarm_cards()
-        if _was_running:
-            self.after(400, self._live_start)
 
     # ── thread simulazione CSV ──────────────────────────────────────────
+    def _live_worker_run(self, target, args):
+        try: target(*args)
+        except Exception as e: self._live_worker_error = str(e)
+        finally: self._live_done_event.set()
+
+
+    def _live_wait(self, seconds):
+        """Tempo CSV; pause/stop/velocità controllati ogni 20 ms."""
+        import time
+        remaining = max(0.0, seconds)
+        while not self._live_stop_event.is_set():
+            if self._live_paused.is_set():
+                self._live_stop_event.wait(0.02)
+                continue
+            if remaining <= 0: return True
+            value = self._live_speed_snapshot
+            if value == "MAX": return True
+            try: speed = max(0.01, float(value.rstrip("x")))
+            except (ValueError, TypeError): speed = 1.0
+            start = time.monotonic()
+            self._live_stop_event.wait(min(0.02, remaining / speed))
+            if not self._live_paused.is_set():
+                remaining -= (time.monotonic() - start) * speed
+        return False
+
+
+    def _live_enqueue(self, row, lossless):
+        while not self._live_stop_event.is_set():
+            if lossless and not self._live_wait(0): return False
+            try:
+                self._live_queue.put(row, timeout=0.02 if lossless else 0)
+                return True
+            except _queue.Full:
+                if not lossless:
+                    self._live_dropped += 1
+                    return True
+        return False
+
+
+    def _live_cancel_poll(self):
+        if self._live_poll_job is not None:
+            self.after_cancel(self._live_poll_job)
+            self._live_poll_job = None
+
+
     def _live_sim_thread(self):
         import time
 
         def _wait_if_paused():
-            """Blocca il thread finché la simulazione è in pausa."""
-            while self._live_paused.is_set() and self._live_running.is_set():
-                time.sleep(0.1)
+            self._live_wait(0)
 
         def _speed_factor():
             # Fix 4: legge solo lo snapshot — mai StringVar dal thread background
@@ -6610,7 +6674,7 @@ class LogAnalyzerApp(ctk.CTk):
                     self._live_dropped = getattr(self, "_live_dropped", 0) + 1
                 t += 0.5
                 sf = _speed_factor()
-                time.sleep(0.5 / sf if sf else 0)
+                self._live_wait(0.5)
             return
 
         # ── riproduzione CSV ────────────────────────────────────────────
@@ -6619,17 +6683,16 @@ class LogAnalyzerApp(ctk.CTk):
                 rows, headers, col_meta, numeric_cols, datetime_cols, _, _, _ = \
                     _parse_long_cycle_csv(self._live_csv_path)
                 _has_embedded_ts = True
-                self.after(0, self._live_log_append, "Formato: Long CSV (Cannon/Persico/Krauss Maffei)")
             else:
                 rows, headers, col_meta, numeric_cols, datetime_cols, _, _, _ = \
                     parse_universal_csv(self._live_csv_path)
                 _has_embedded_ts = False
         except Exception as e:
-            self._live_queue.put({"_error": str(e)})
+            self._live_worker_error = str(e)
             return
 
         if not numeric_cols:
-            self._live_queue.put({"_error": "Nessuna colonna numerica nel CSV."})
+            self._live_worker_error = "Nessuna colonna numerica nel CSV."
             return
 
         # ── rileva la colonna tempo ─────────────────────────────────────
@@ -6648,11 +6711,6 @@ class LogAnalyzerApp(ctk.CTk):
 
         use_datetime = _has_embedded_ts or (x_col_dt is not None)
         use_num_time = (not use_datetime) and (x_col_num is not None)
-
-        if not _has_embedded_ts:
-            self.after(0, self._live_log_append,
-                f"Tempo: {'datetime «' + x_col_dt + '»' if use_datetime else '«' + x_col_num + '» (sec)' if use_num_time else 'indice fisso'}"
-            )
 
         prev_dt  = None
         prev_num = None
@@ -6684,11 +6742,11 @@ class LogAnalyzerApp(ctk.CTk):
                     if prev_dt is not None and sf is not None:
                         delta = (ts - prev_dt).total_seconds()
                         if delta > 0:
-                            time.sleep(max(0.01, delta / sf))
+                            self._live_wait(max(0.0, delta))
                     prev_dt = ts
                 else:
                     if sf is not None:
-                        time.sleep(0.1 / sf)
+                        self._live_wait(0.1)
 
             elif use_datetime:
                 ts = _uc_parse_dt(r.get(x_col_dt, ""))
@@ -6696,11 +6754,11 @@ class LogAnalyzerApp(ctk.CTk):
                     row_out["_ts"] = ts
                     if prev_dt is not None and sf is not None:
                         delta = (ts - prev_dt).total_seconds()
-                        time.sleep(max(0.01, delta / sf))
+                        self._live_wait(max(0.0, delta))
                     prev_dt = ts
                 else:
                     if sf is not None:
-                        time.sleep(0.1 / sf)
+                        self._live_wait(0.1)
 
             elif use_num_time:
                 try:
@@ -6709,21 +6767,19 @@ class LogAnalyzerApp(ctk.CTk):
                     if prev_num is not None and sf is not None:
                         delta = t_now - prev_num
                         if delta > 0:
-                            time.sleep(max(0.01, delta / sf))
+                            self._live_wait(max(0.0, delta))
                     prev_num = t_now
                 except Exception:
                     if sf is not None:
-                        time.sleep(0.1 / sf)
+                        self._live_wait(0.1)
 
             else:
                 row_out["_sim_i"] = i
                 if sf is not None:
-                    time.sleep(max(0.01, 1.0 / sf))
+                    self._live_wait(1.0)
 
-            try:
-                self._live_queue.put_nowait(row_out)
-            except _queue.Full:
-                self._live_dropped = getattr(self, "_live_dropped", 0) + 1
+            if not self._live_enqueue(row_out, lossless=True):
+                return
 
     # ── thread seriale reale ────────────────────────────────────────────
     def _live_serial_thread(self, port, baud):
@@ -6791,7 +6847,9 @@ class LogAnalyzerApp(ctk.CTk):
 
     # ── polling UI ───────────────────────────────────────────────────────
     def _live_poll(self):
-        if not self._live_running.is_set():
+        self._live_cancel_poll()
+        if self._live_paused.is_set() and self._live_source_snapshot == "Simulazione CSV":
+            self._live_poll_job = self.after(50, self._live_poll)
             return
         drained = 0
         last_row = None
@@ -6803,8 +6861,11 @@ class LogAnalyzerApp(ctk.CTk):
             drained += 1
             if "_error" in row:
                 self._live_log_append(f"ERRORE: {row['_error']}")
-                self._live_stop()
-                return
+                self._live_worker_error = row["_error"]
+                self._live_stop_event.set()
+                self._live_running.clear()
+                continue
+            self._live_total += 1
             self._live_rows.append(row)
             # C2: finestra scorrevole — memoria bounded, non cresce infinitamente
             if len(self._live_rows) > MAX_LIVE_POINTS:
@@ -6836,7 +6897,7 @@ class LogAnalyzerApp(ctk.CTk):
             dropped = getattr(self, "_live_dropped", 0)
             drop_txt = f"  |  Scartati: {dropped}" if dropped > 0 else ""
             self._live_cnt_lbl.configure(
-                text=f"Campioni: {len(self._live_rows)}  |  In coda: {self._live_queue.qsize()}{drop_txt}")
+                text=f"Elaborati: {self._live_total}  |  In vista: {len(self._live_rows)}  |  In coda: {self._live_queue.qsize()}{drop_txt}")
             if set(self._live_numeric_cols) != getattr(self, "_live_last_cols_set", set()):
                 self._live_last_cols_set = set(self._live_numeric_cols)
                 self._live_rebuild_col_buttons()
@@ -6846,14 +6907,30 @@ class LogAnalyzerApp(ctk.CTk):
             interp_on = (getattr(self, "_live_interp_var", None) and
                          self._live_interp_var.get() and
                          self._live_interp_job is not None)
-            if not interp_on:
+            if not interp_on and not self._live_paused.is_set():
                 self._live_refresh_plot()
 
         try:
             ms = max(100, int(self._live_rate_var.get()))
         except Exception:
             ms = 500
-        self.after(ms, self._live_poll)
+        if self._live_done_event.is_set() and self._live_queue.empty():
+            self._live_running.clear()
+            self._live_paused.clear()
+            self._live_stop_interp_timer()
+            self._live_start_btn.configure(state="normal")
+            self._live_stop_btn.configure(state="disabled")
+            self._live_pause_btn.configure(state="disabled", text="⏸", fg_color=COLORS["warn"])
+            if self._live_worker_error:
+                self._live_set_status("Errore riproduzione/acquisizione", COLORS["warn"])
+                self._live_log_append(f"ERRORE: {self._live_worker_error}")
+                self._live_worker_error = None
+            elif not self._live_stop_event.is_set():
+                self._live_set_status("Riproduzione completata" if self._live_source_snapshot == "Simulazione CSV" else "Acquisizione terminata", COLORS["info"])
+            self._live_refresh_plot()
+            return
+        if self._live_running.is_set() or (self._live_thread is not None and self._live_thread.is_alive()) or not self._live_queue.empty():
+            self._live_poll_job = self.after(ms, self._live_poll)
 
     def _live_refresh_plot(self):
         if not self._live_rows or not self._live_plot_cols:
@@ -6953,6 +7030,7 @@ class LogAnalyzerApp(ctk.CTk):
     # ── interpolazione (A) ───────────────────────────────────────────────
     def _live_start_interp_timer(self):
         """Avvia il ticker da 200ms per aggiornare il grafico con punti interpolati."""
+        if not self._live_running.is_set() or self._live_paused.is_set(): return
         if self._live_interp_job is not None:
             return  # già attivo
         self._live_interp_tick()
@@ -6966,7 +7044,7 @@ class LogAnalyzerApp(ctk.CTk):
     def _live_interp_tick(self):
         """Ogni 200ms aggiunge un punto interpolato. Fix 2: salta se il poll
         ha già ridisegnato negli ultimi 150ms (evita doppio redraw)."""
-        if not self._live_running.is_set():
+        if not self._live_running.is_set() or self._live_paused.is_set():
             self._live_interp_job = None
             return
         if not self._live_rows or len(self._live_rows) < 2:
