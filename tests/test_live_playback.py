@@ -25,8 +25,10 @@ import matplotlib.dates as mdates
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 
-SOURCE = Path(__file__).parents[1] / 'log_analyzer_desktop_live.py'
-TREE = ast.parse(SOURCE.read_text(encoding='utf-8'))
+import sys
+sys.path.insert(0, str(Path(__file__).parent))
+from _app_source import load_tree, SOURCE
+TREE = load_tree()
 NAMES = {'parse_universal_csv','_uc_parse_dt','_uc_try_float','_uc_col_meta',
          '_is_long_cycle_csv','_parse_long_cycle_csv'}
 CONSTANTS = {'COLORS','MAX_LIVE_POINTS','UNIT_PATTERNS','_UC_TSFMTS',

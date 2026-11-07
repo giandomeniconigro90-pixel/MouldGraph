@@ -3,6 +3,9 @@ import ast
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
+import sys
+sys.path.insert(0, str(Path(__file__).parent))
+from _app_source import load_tree
 import numpy as np
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg
@@ -11,8 +14,7 @@ from matplotlib.backend_bases import MouseEvent
 
 class FullscreenHoverTests(unittest.TestCase):
     def setUp(self):
-        source = (Path(__file__).parents[1] / 'log_analyzer_desktop_live.py').read_text()
-        tree = ast.parse(source)
+        tree = load_tree()
         app = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'LogAnalyzerApp')
         method = next(n for n in app.body if isinstance(n, ast.FunctionDef) and n.name == '_grafici_open_fullscreen')
         # Execute the actual overlay setup/callbacks, without creating Tk windows.
